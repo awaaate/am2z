@@ -1,0 +1,88 @@
+{
+  "name": "am2z",
+  "version": "2.0.0",
+  "description": "A React-inspired functional framework for building AI agents and data processing pipelines with BullMQ integration and Effect-TS",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./core": {
+      "import": "./dist/lib/core/index.js",
+      "types": "./dist/lib/core/index.d.ts"
+    },
+    "./node": {
+      "import": "./dist/lib/node/index.js",
+      "types": "./dist/lib/node/index.d.ts"
+    }
+  },
+  "scripts": {
+    "build": "bun run clean && bun run type-check && bun run build:js",
+    "build:js": "bun build index.ts --outdir dist --target node --format esm --splitting --minify",
+    "type-check": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "dev": "bun run --watch src/examples/effect-pipeline.ts",
+    "example:functional": "bun run src/examples/functional-pipeline.ts",
+    "example:agent": "bun run src/examples/agent-pipeline.ts",
+    "example:effect": "bun run src/examples/effect-pipeline.ts",
+    "test": "bun test",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\" \"*.md\"",
+    "docs:serve": "cd docs && python -m http.server 8080"
+  },
+  "keywords": [
+    "typescript",
+    "pipeline",
+    "functional",
+    "reactive",
+    "ai",
+    "agents",
+    "bullmq",
+    "queue",
+    "distributed",
+    "effect-ts",
+    "immer",
+    "state-management",
+    "composition",
+    "workflow"
+  ],
+  "author": "AM2Z Framework Team",
+  "license": "MIT",
+  "dependencies": {
+    "@bull-board/api": "^6.10.1",
+    "@bull-board/express": "^6.10.1",
+    "@bull-board/ui": "^6.10.1",
+    "bullmq": "^5.56.0",
+    "effect": "^3.0.0",
+    "express": "^5.1.0",
+    "immer": "^10.0.3",
+    "ioredis": "^5.6.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.5",
+    "typescript": "^5.3.0"
+  },
+  "peerDependencies": {
+    "redis": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "bun": ">=1.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/am2z/am2z.git"
+  },
+  "bugs": {
+    "url": "https://github.com/am2z/am2z/issues"
+  },
+  "homepage": "https://github.com/am2z/am2z#readme"
+}
