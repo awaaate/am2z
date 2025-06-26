@@ -1,19 +1,28 @@
 // src/lib/core/processor-executor.ts
-import { type Result } from "./result";
-import { type AppState, type StateManager } from "./state";
-import { TimeoutError, AM2ZError, ProcessorExecutionError } from "./errors";
 import {
-  type ProcessorDefinition,
+  CallDepthExceededError,
+  extractPartialState,
+  TimeoutError,
+  wrapAsProcessorError,
+} from "./errors";
+import { type Logger } from "./logging";
+import {
   type ProcessorContext,
-  type ProcessorResult,
+  type ProcessorDefinition,
   type ProcessorMetadata,
+  type ProcessorResult,
+  SERVER_OVERHEAD_MS,
 } from "./processor";
+import { type AppState, type StateManager } from "./state";
 
 /**
  * Shared processor execution logic between Local and Distributed runtimes
  */
 export class ProcessorExecutor<TState extends AppState = AppState> {
-  constructor(private readonly stateManager?: StateManager<TState>) {}
+  constructor(
+    private readonly stateManager?: StateManager<TState>,
+    private readonly defaultTimeout: number = 60000
+  ) {}
 
   /**
    * Execute a processor with shared logic for timeouts, errors, and metrics
@@ -26,118 +35,88 @@ export class ProcessorExecutor<TState extends AppState = AppState> {
     const startTime = Date.now();
 
     try {
-      context.log.info(`Executing processor: ${processor.name}`, {
-        executionId: context.meta.executionId,
-        timeout: processor.config.timeout,
+      // Create timeout management - único lugar donde se maneja el timeout
+      const rawTimeout = processor.config.timeout ?? this.defaultTimeout;
+      const effectiveTimeout = rawTimeout + SERVER_OVERHEAD_MS;
+      const controller = new AbortController();
+
+      // Use the enhanced context with proper signal propagation
+      const enhancedContext: ProcessorContext<TState> = {
+        ...context,
+        signal: context.signal || controller.signal,
+      };
+
+      // Set up timeout with proper cleanup
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+      }, effectiveTimeout);
+
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        controller.signal.addEventListener("abort", () => {
+          reject(
+            new TimeoutError(
+              `Processor ${processor.name} timed out after ${effectiveTimeout}ms`,
+              effectiveTimeout
+            )
+          );
+        });
       });
 
-      // If a state manager is provided, use it to update the state.
-      if (this.stateManager) {
-        const newSate = await this.stateManager.update(
-          context.meta.sessionId,
-          (currentState) => {
-            const result = processor.config.timeout
-              ? this.executeWithTimeout(processor, currentState, context)
-              : processor.fn(currentState, context);
-            // This is not ideal, as we are in a sync function. But it will work for now.
-            return result.then((r) => {
-              if (r.success) {
-                return r.data;
-              }
-              throw r.error;
-            });
-          }
-        );
+      const executionPromise = processor.fn(state, enhancedContext);
 
-        const executionTime = Date.now() - startTime;
-
-        return {
-          state: newSate,
-          executionTime,
-          success: true,
-          metadata: context.meta,
-        };
+      let result;
+      try {
+        result = await Promise.race([executionPromise, timeoutPromise]);
+      } finally {
+        // **Muy importante** - siempre limpiar el timeout para evitar fugas
+        clearTimeout(timeoutId);
       }
-
-      // Execute with timeout if configured
-      const result = await (processor.config.timeout
-        ? this.executeWithTimeout(processor, state, context)
-        : processor.fn(state, context));
-
       const executionTime = Date.now() - startTime;
 
       if (result.success) {
-        context.log.info(`Processor completed: ${processor.name}`, {
-          executionId: context.meta.executionId,
-          executionTime,
-        });
-
+        // Update state manager with successful result
+        await this.stateManager?.set(context.meta.sessionId, result.data);
         return {
           state: result.data,
           executionTime,
           success: true,
-          metadata: context.meta,
+          metadata: enhancedContext.meta,
         };
       } else {
-        context.log.error(`Processor failed: ${processor.name}`, result.error, {
-          executionId: context.meta.executionId,
-          executionTime,
-        });
+        // Handle failure with potential partial state using standardized extraction
+        const partialState = extractPartialState<TState>(result.error);
+        const effectiveState = partialState || state;
 
+        await this.stateManager?.set(context.meta.sessionId, effectiveState);
         return {
-          state,
+          state: effectiveState,
           executionTime,
           success: false,
           error: result.error,
-          metadata: context.meta,
+          metadata: enhancedContext.meta,
         };
       }
     } catch (error) {
       const executionTime = Date.now() - startTime;
+      const wrappedError = wrapAsProcessorError(
+        error as Error,
+        processor.name,
+        context.meta.executionId
+      );
 
-      const am2zError =
-        error instanceof AM2ZError
-          ? error
-          : new ProcessorExecutionError(
-              processor.name,
-              context.meta.executionId,
-              error instanceof Error ? error : new Error(String(error))
-            );
+      // Check if this is a chain processor error with partial state using standardized extraction
+      const partialState = extractPartialState<TState>(wrappedError);
+      const stateToReturn = partialState || state;
 
-      context.log.error(`Processor crashed: ${processor.name}`, am2zError, {
-        executionId: context.meta.executionId,
-        executionTime,
-      });
-
+      await this.stateManager?.set(context.meta.sessionId, stateToReturn);
       return {
-        state,
+        state: stateToReturn,
         executionTime,
         success: false,
-        error: am2zError,
+        error: wrappedError,
         metadata: context.meta,
       };
     }
-  }
-
-  /**
-   * Execute processor with timeout
-   */
-  private async executeWithTimeout(
-    processor: ProcessorDefinition<TState>,
-    state: TState,
-    context: ProcessorContext<TState>
-  ): Promise<Result<TState, AM2ZError>> {
-    const timeoutMs = processor.config.timeout!;
-
-    return Promise.race([
-      processor.fn(state, context),
-      new Promise<Result<TState, AM2ZError>>((_, reject) =>
-        setTimeout(
-          () => reject(new TimeoutError(processor.name, timeoutMs)),
-          timeoutMs
-        )
-      ),
-    ]);
   }
 }
 
@@ -148,19 +127,78 @@ export class ContextFactory<TState extends AppState = AppState> {
   createContext(
     processor: ProcessorDefinition<TState>,
     metadata: ProcessorMetadata,
-    caller: (
+    caller: ProcessorCaller<TState>,
+    emitter: (eventType: string, data?: unknown) => void,
+    logger: Logger,
+    callDepth: number = 0,
+    maxCallDepth: number = 10,
+    signal?: AbortSignal
+  ): ProcessorContext<TState> {
+    // Enhanced caller with full context propagation
+    const limitedCaller = async (
       processorName: string,
       state: TState
-    ) => Promise<Result<TState, AM2ZError>>,
-    emitter: (eventType: string, data?: unknown) => void,
-    logger: any
-  ): ProcessorContext<TState> {
-    return {
-      log: logger.withSource(processor.name),
-      meta: metadata,
-      call: caller,
-      emit: emitter,
+    ): Promise<ProcessorResult<TState>> => {
+      // Check call depth limit
+      if (callDepth >= maxCallDepth) {
+        const error = new CallDepthExceededError(
+          `Maximum call depth exceeded: ${callDepth} >= ${maxCallDepth}`,
+          maxCallDepth,
+          callDepth
+        );
+        return {
+          state,
+          executionTime: 0,
+          success: false,
+          error,
+          metadata: new MetadataFactory().createMetadata(
+            processorName,
+            metadata.sessionId,
+            metadata.executionId
+          ),
+        };
+      }
+
+      // ✅ IMPROVED: Full context propagation
+      const nestedContext: ProcessorCallContext = {
+        callDepth: callDepth + 1,
+        signal,
+        sessionId: metadata.sessionId,
+        parentExecutionId: metadata.executionId,
+        chainName: processor.name,
+        chainPosition: callDepth,
+        inheritedTimeout: processor.config.timeout,
+        isRetry: false,
+        retryAttempt: 1,
+      };
+
+      return caller(processorName, state, nestedContext);
     };
+
+    return {
+      log: logger.withSource ? logger.withSource(processor.name) : logger,
+      meta: metadata,
+      call: limitedCaller,
+      emit: emitter,
+      callDepth,
+      signal,
+      debug: {
+        callStack: this.buildCallStack(metadata, callDepth),
+        parentExecutionId: metadata.executionId,
+      },
+    };
+  }
+
+  private buildCallStack(
+    metadata: ProcessorMetadata,
+    callDepth: number
+  ): string[] {
+    // Build a simple call stack representation
+    const stack = [`${metadata.processorName}[${metadata.executionId}]`];
+    for (let i = 0; i < callDepth; i++) {
+      stack.unshift(`  depth-${i}`);
+    }
+    return stack;
   }
 }
 
@@ -172,18 +210,47 @@ export class MetadataFactory {
     processorName: string,
     sessionId: string,
     executionId?: string,
-    startedAt?: number
+    startedAt?: number,
+    attempt: number = 1
   ): ProcessorMetadata {
     return {
       processorName,
-      executionId: executionId || this.generateExecutionId(processorName),
       sessionId,
-      attempt: 1,
-      startedAt: startedAt || Date.now(),
+      executionId: executionId ?? this.generateExecutionId(processorName),
+      attempt,
+      startedAt: startedAt ?? Date.now(),
     };
   }
 
-  generateExecutionId(processorName: string): string {
-    return `${processorName}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  generateExecutionId(
+    processorName: string,
+    parentExecutionId?: string
+  ): string {
+    const timestamp = Date.now();
+    const random = Math.random().toString(36).substring(2, 8);
+    const prefix = parentExecutionId
+      ? `${parentExecutionId.split("-")[0]}-`
+      : "";
+    return `${prefix}${processorName}-${timestamp}-${random}`;
   }
 }
+
+export interface ProcessorCallContext {
+  readonly callDepth: number;
+  readonly signal?: AbortSignal;
+  readonly sessionId: string;
+  readonly parentExecutionId: string;
+  // ✅ NEW: Chain-specific context
+  readonly chainName?: string;
+  readonly chainPosition?: number;
+  readonly inheritedTimeout?: number;
+  // ✅ NEW: Retry context
+  readonly isRetry?: boolean;
+  readonly retryAttempt?: number;
+}
+
+export type ProcessorCaller<TState extends AppState> = (
+  processorName: string,
+  state: TState,
+  callContext?: Partial<ProcessorCallContext>
+) => Promise<ProcessorResult<TState>>;

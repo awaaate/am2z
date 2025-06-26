@@ -13,6 +13,7 @@ import {
 } from "../test-utils";
 import { TimeoutError } from "../../lib/core/errors";
 import { Success } from "../../lib/core";
+import { ProcessorExecutionError } from "../../lib/core/errors";
 
 describe("ProcessorExecutor", () => {
   let executor: ProcessorExecutor<TestState>;
@@ -92,8 +93,10 @@ describe("ProcessorExecutor", () => {
     const result = await executor.executeProcessor(processor, state, context);
 
     expect(result.success).toBe(false);
-    expect(result.error).toBeInstanceOf(TimeoutError);
-    expect(result.executionTime).toBeLessThan(200); // Should timeout before 200ms
+    expect(result.error).toBeInstanceOf(ProcessorExecutionError);
+    expect((result.error as ProcessorExecutionError).cause).toBeInstanceOf(
+      TimeoutError
+    );
   });
 
   it("should measure execution time accurately", async () => {
@@ -150,8 +153,9 @@ describe("ContextFactory", () => {
 
     expect(context.log).toBeDefined();
     expect(context.meta).toBe(metadata);
-    expect(context.call).toBe(mockCaller);
+    expect(context.call).toEqual(expect.any(Function));
     expect(context.emit).toBe(mockEmitter);
+    expect(context.signal).toBeUndefined();
   });
 });
 

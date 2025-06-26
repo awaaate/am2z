@@ -75,6 +75,9 @@ describe("QueueRuntime", () => {
 
     await runtime.start();
 
+    // Add a small delay to ensure connections are fully established
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
     const initialState = createTestState(0, []);
     const result = await runtime.execute("failing-processor", initialState);
 
@@ -120,6 +123,9 @@ describe("QueueRuntime", () => {
     runtime.register(processor);
 
     await runtime.start();
+
+    // Add a small delay to ensure uptime is measurable
+    await new Promise((resolve) => setTimeout(resolve, 10));
 
     const stats = await runtime.getStats();
 

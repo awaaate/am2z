@@ -12,7 +12,10 @@ import {
   ProcessorExecutor,
   ContextFactory,
   MetadataFactory,
+  type ProcessorCallContext,
 } from "../core/processor-executor";
+import { type AM2ZError } from "../core/errors";
+import { type RuntimeConfig, DEFAULT_RUNTIME_CONFIG } from "../core/runtime";
 
 export interface WorkerConfig {
   readonly concurrency?: number;
@@ -27,6 +30,7 @@ export class WorkerManager<TState extends AppState = AppState> {
   private executor: ProcessorExecutor<TState>;
   private contextFactory = new ContextFactory<TState>();
   private metadataFactory = new MetadataFactory();
+  private readonly runtimeConfig: RuntimeConfig;
 
   constructor(
     private readonly connectionManager: ConnectionManager,
@@ -43,10 +47,22 @@ export class WorkerManager<TState extends AppState = AppState> {
     ) => void = () => {},
     private readonly processorCaller: (
       processorName: string,
-      state: TState
-    ) => Promise<any> = async () => ({ success: false })
+      state: TState,
+      callContext?: Partial<ProcessorCallContext>
+    ) => Promise<ProcessorResult<TState>> = async () => ({
+      success: false,
+      error: new Error("No processor caller provided") as AM2ZError,
+      state: {} as TState,
+      executionTime: 0,
+      metadata: {} as any,
+    }),
+    runtimeConfig?: RuntimeConfig
   ) {
-    this.executor = new ProcessorExecutor<TState>(this.stateManager);
+    this.runtimeConfig = runtimeConfig || DEFAULT_RUNTIME_CONFIG;
+    this.executor = new ProcessorExecutor<TState>(
+      this.stateManager,
+      this.runtimeConfig.defaultTimeout
+    );
   }
 
   /**
@@ -57,11 +73,33 @@ export class WorkerManager<TState extends AppState = AppState> {
 
     const worker = new Worker(
       queueName,
-      async (job) => this.processJob(job, processor),
+      async (job) => {
+        // Process job using shared executor (timeout handled internally)
+        const result = await this.processJob(job, processor);
+
+        // Critical Fix: If processor returned failure, throw error to mark job as failed in BullMQ
+        if (!result.success) {
+          const error = result.error || new Error("Processor execution failed");
+
+          // Preserve full result in error data for debugging
+          (error as any).jobResult = result;
+
+          this.logger.error(`Job failed: ${job.id}`, error, {
+            processorName: processor.name,
+            executionId: job.data.executionId,
+            executionTime: result.executionTime,
+          });
+
+          throw error; // This makes BullMQ treat the job as failed and trigger retry logic
+        }
+
+        // Return successful result
+        return result;
+      },
       {
         concurrency:
-          processor.config.queueConfig?.concurrency ||
-          this.config.concurrency ||
+          processor.config.queueConfig?.concurrency ??
+          this.config.concurrency ??
           5,
         stalledInterval: this.config.stalledInterval || 30000,
         maxStalledCount: this.config.maxStalledCount || 1,
@@ -105,21 +143,36 @@ export class WorkerManager<TState extends AppState = AppState> {
     job: Job,
     processor: ProcessorDefinition<TState>
   ): Promise<ProcessorResult<TState>> {
-    const { processorName, state, sessionId, executionId } = job.data;
+    const { processorName, state, sessionId, executionId, callContext } =
+      job.data;
 
     const metadata = this.metadataFactory.createMetadata(
       processorName,
       sessionId,
       executionId,
-      Date.now()
+      Date.now(),
+      callContext?.retryAttempt || 1
     );
 
+    // ✅ IMPROVED: Create logger with chain context if available
+    const logger = callContext?.chainName
+      ? this.logger.withContext({
+          chainName: callContext.chainName,
+          chainPosition: callContext.chainPosition,
+          parentExecutionId: callContext.parentExecutionId,
+        })
+      : this.logger;
+
+    // ✅ IMPROVED: Create context with inherited call depth and chain info
     const context = this.contextFactory.createContext(
       processor,
       metadata,
       this.processorCaller,
       this.eventEmitter,
-      this.logger
+      logger,
+      callContext?.callDepth || 0, // ✅ Inherit call depth
+      this.runtimeConfig.maxCallDepth
+      // AbortSignal is now handled internally by ProcessorExecutor
     );
 
     return this.executor.executeProcessor(processor, state, context);
@@ -135,11 +188,17 @@ export class WorkerManager<TState extends AppState = AppState> {
         processorName,
         executionTime,
       });
-
-      this.eventEmitter("processor:completed", {
+      this.logger.info("[WORKER] Job completed", {
+        executionId: job.data.executionId,
+        processorName: job.data.processorName,
+        parentExecutionId: job.data.callContext?.parentExecutionId,
+        chainName: job.data.callContext?.chainName,
+        chainPosition: job.data.callContext?.chainPosition,
+      });
+      this.eventEmitter("processor:job:completed", {
         jobId: job.id,
         processorName,
-        returnvalue,
+        result: returnvalue, // ✅ Usar 'result' en lugar de 'returnvalue'
         executionTime,
         executionId: job.data?.executionId || job.id,
       });
@@ -150,11 +209,19 @@ export class WorkerManager<TState extends AppState = AppState> {
         processorName,
         attempts: job?.attemptsMade,
       });
-
-      this.eventEmitter("processor:failed", {
+      this.logger.info("[WORKER] Job failed", {
+        executionId: job?.data?.executionId,
+        processorName: job?.data?.processorName,
+        parentExecutionId: job?.data?.callContext?.parentExecutionId,
+        chainName: job?.data?.callContext?.chainName,
+        chainPosition: job?.data?.callContext?.chainPosition,
+      });
+      this.eventEmitter("processor:job:failed", {
         jobId: job?.id,
         processorName,
-        error: err.message,
+        error: err, // ✅ Pasar el error completo, no solo el mensaje
+        result: (err as any).jobResult, // Pass the full result
+        executionId: job?.data?.executionId || job?.id,
         attempts: job?.attemptsMade,
       });
     });
@@ -196,8 +263,14 @@ export class WorkerManager<TState extends AppState = AppState> {
    * Close all workers
    */
   async closeAll(): Promise<void> {
-    const closings = Array.from(this.workers.values()).map((worker) =>
-      worker.close()
+    const closings = Array.from(this.workers.entries()).map(
+      async ([name, worker]) => {
+        try {
+          await worker.close();
+        } catch (error) {
+          this.logger.warn(`Error closing worker for ${name}`, { error });
+        }
+      }
     );
     await Promise.all(closings);
     this.workers.clear();

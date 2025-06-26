@@ -134,11 +134,13 @@ export function createConversationExplorerOrchestrator(
   );
 
   // Main orchestration chain
-  const mainChain = chainProcessors<ConversationExplorerState>(
-    "conversationExplorerChain",
-    stageRouter,
-    analyticsProc // Always run analytics after each stage
-  );
+  const mainChain = chainProcessors<ConversationExplorerState>({
+    name: "conversationExplorerChain",
+    timeoutStrategy: stageRouter,
+    processors: [
+      analyticsProc, // Always run analytics after each stage
+    ],
+  });
 
   // Add retry logic to the main chain for resilience
   const resilientChain = withRetry(mainChain, {
@@ -177,13 +179,11 @@ export function createAdvancedConversationOrchestrator(
   const monitoringProcessor = createMonitoringProcessor();
 
   // Advanced chain with parallel optimization
-  return chainProcessors<ConversationExplorerState>(
-    "advancedConversationExplorer",
-    advancedRouter,
-    parallelWorkflow,
-    monitoringProcessor,
-    analyticsProcessor
-  );
+  return chainProcessors<ConversationExplorerState>({
+    name: "advancedConversationExplorer",
+    timeoutStrategy: advancedRouter,
+    processors: [parallelWorkflow, monitoringProcessor, analyticsProcessor],
+  });
 }
 
 // === Specialized Processors ===
@@ -315,17 +315,16 @@ function createParallelWorkflowProcessor(
       return "sequential";
     },
     {
-      parallel: parallelProcessors(
-        "parallelWorkflowExecution",
-        questionGeneration,
-        batchProcessing,
-        performanceMonitoring
-      ),
-      sequential: chainProcessors(
-        "sequentialWorkflow",
-        questionGeneration,
-        batchProcessing
-      ),
+      parallel: parallelProcessors({
+        name: "parallelWorkflowExecution",
+        timeoutStrategy: questionGeneration,
+        processors: [batchProcessing, performanceMonitoring],
+      }),
+      sequential: chainProcessors({
+        name: "sequentialWorkflow",
+        timeoutStrategy: questionGeneration,
+        processors: [batchProcessing],
+      }),
     }
   );
 }

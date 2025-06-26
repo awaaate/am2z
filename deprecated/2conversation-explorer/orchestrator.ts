@@ -45,11 +45,11 @@ export function createConversationExplorerOrchestrator(aiService: AIService) {
 
   // Main orchestration chain
   // Always run analytics after the stage-specific processor
-  const mainChain = chainProcessors<ConversationExplorerState>(
-    "conversationExplorerChain",
-    stageRouter,
-    analyticsProcessor
-  );
+  const mainChain = chainProcessors<ConversationExplorerState>({
+    name: "conversationExplorerChain",
+    timeoutStrategy: stageRouter,
+    processors: [analyticsProcessor],
+  });
 
   return {
     mainProcessor: mainChain,
@@ -161,11 +161,13 @@ export function createAdvancedConversationOrchestrator(aiService: AIService) {
     {
       setup: createSetupProcessor(),
       processing: batchAnswerer,
-      parallel_processing: parallelProcessors(
-        "parallelQuestionProcessing",
-        batchAnswerer,
-        generateQuestions // Process existing and generate new questions in parallel
-      ),
+      parallel_processing: parallelProcessors({
+        name: "parallelQuestionProcessing",
+        timeoutStrategy: batchAnswerer,
+        processors: [
+          generateQuestions, // Process existing and generate new questions in parallel
+        ],
+      }),
       expanding: generateQuestions,
       completed: createCompletionProcessor(),
     },
@@ -173,12 +175,11 @@ export function createAdvancedConversationOrchestrator(aiService: AIService) {
   );
 
   // Advanced chain with monitoring
-  const advancedChain = chainProcessors<ConversationExplorerState>(
-    "advancedConversationExplorer",
-    advancedRouter,
-    analyticsProcessor,
-    createMonitoringProcessor()
-  );
+  const advancedChain = chainProcessors<ConversationExplorerState>({
+    name: "advancedConversationExplorer",
+    timeoutStrategy: advancedRouter,
+    processors: [analyticsProcessor, createMonitoringProcessor()],
+  });
 
   return {
     mainProcessor: advancedChain,

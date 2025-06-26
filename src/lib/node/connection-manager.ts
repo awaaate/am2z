@@ -111,8 +111,15 @@ export class ConnectionManager {
    * Disconnect all connections
    */
   async disconnect(): Promise<void> {
-    const disconnections = Array.from(this.connections.values()).map((conn) =>
-      conn.disconnect()
+    const disconnections = Array.from(this.connections.values()).map(
+      async (conn) => {
+        try {
+          await conn.disconnect();
+        } catch (error) {
+          // Ignore disconnection errors
+          this.logger.debug("Error disconnecting Redis connection", { error });
+        }
+      }
     );
 
     await Promise.all(disconnections);

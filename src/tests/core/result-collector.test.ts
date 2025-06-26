@@ -69,7 +69,11 @@ describe("ResultCollector", () => {
 
     const resultPromise = resultCollector.waitForResult(executionId, timeoutMs);
 
-    await expect(resultPromise).rejects.toBeInstanceOf(TimeoutError);
+    const result = await resultPromise;
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBeInstanceOf(TimeoutError);
+    expect(result.error?.message).toContain("timed out after 100ms");
   });
 
   it("should handle multiple pending executions", async () => {

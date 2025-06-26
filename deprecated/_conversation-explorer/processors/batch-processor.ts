@@ -218,7 +218,7 @@ export function createParallelBatchProcessor(
   );
 
   // Use parallelProcessors to run them concurrently
-  return parallelProcessors("parallelBatchProcessor", ...batchProcessors);
+  return parallelProcessors({ name: "parallelBatchProcessor", timeoutStrategy: ...batchProcessors });
 }
 
 /**

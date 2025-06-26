@@ -237,12 +237,11 @@ for (const config of runtimeConfigs) {
             });
           });
 
-        const registrationWorkflow = chainProcessors(
-          "user-registration",
-          validateEmail,
-          sendWelcomeEmail,
-          createProfile
-        );
+        const registrationWorkflow = chainProcessors({
+          name: "user-registration",
+          timeoutStrategy: validateEmail,
+          processors: [sendWelcomeEmail, createProfile],
+        });
 
         runtime.register(registrationWorkflow);
         await runtime.start();
@@ -342,12 +341,11 @@ for (const config of runtimeConfigs) {
           });
         });
 
-        const orderWorkflow = chainProcessors(
-          "order-processing",
-          validateOrder,
-          reserveInventory,
-          processPayment
-        );
+        const orderWorkflow = chainProcessors({
+          name: "order-processing",
+          timeoutStrategy: validateOrder,
+          processors: [reserveInventory, processPayment],
+        });
 
         runtime.register(orderWorkflow);
         await runtime.start();
@@ -467,12 +465,11 @@ for (const config of runtimeConfigs) {
           });
         });
 
-        const dataWorkflow = chainProcessors(
-          "data-pipeline",
-          cleanData,
-          analyzeData,
-          generateInsights
-        );
+        const dataWorkflow = chainProcessors({
+          name: "data-pipeline",
+          timeoutStrategy: cleanData,
+          processors: [analyzeData, generateInsights],
+        });
 
         runtime.register(dataWorkflow);
         await runtime.start();

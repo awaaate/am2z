@@ -79,50 +79,32 @@ export {
   type ProcessorRuntime,
   type RuntimeStats,
   LocalRuntime,
-  createLocalRuntime,
-  runProcessor,
-  runPipeline,
-} from './src/lib/core';
+  validateRuntimeConfig,
+} from "./src/lib/core";
 
 // === Distributed Runtime (Node.js) ===
 export {
-  DistributedRuntime,
-  createDistributedRuntime,
-  type DistributedRuntimeConfig,
-  type RedisConfig,
-  type WorkerConfig,
-  type QueueConfig as DistributedQueueConfig,
+  QueueRuntime,
+  createQueueRuntime,
+  createQueueRuntimeWithDefaults,
+  type QueueRuntimeConfig,
+  type MonitoringConfig,
   type ErrorHandlingConfig,
-} from './src/lib/node/distributed-runtime';
-
-// === Examples ===
-export {
-  runConversationExplorer,
-  demonstrateConversationExplorer,
-  type ConversationExplorerState,
-  type Persona,
-  type ConversationNode,
-  type ConversationTreeConfig,
-  type ConversationAnalytics,
-} from './src/examples/conversation-explorer-v4';
+} from "./src/lib/node/queue-runtime";
 
 // === Framework Info ===
 export const AM2Z = {
-  VERSION: '4.0.0',
+  VERSION: "4.0.0",
   FEATURES: [
-    'Type-safe processor architecture',
-    'Immutable state management with Immer',
-    'Result-based error handling',
-    'Composable processor chains',
-    'Local and distributed execution',
-    'Comprehensive logging and metrics',
-    'BullMQ integration with best practices',
-    'React-inspired functional design',
+    "Type-safe processor architecture",
+    "Immutable state management with Immer",
+    "Result-based error handling",
+    "Composable processor chains",
+    "Local and distributed execution",
+    "Comprehensive logging and metrics",
+    "BullMQ integration with best practices",
+    "React-inspired functional design",
   ] as const,
-  
-  // Quick start helpers
-  createSimpleProcessor: (name: string) => (createProcessor as any)(name),
-  createSimpleRuntime: <TState = any>(logger?: any) => (createLocalRuntime as any)<TState>(logger),
 } as const;
 
 // === Default Export for Simple Usage ===

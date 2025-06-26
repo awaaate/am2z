@@ -45,8 +45,17 @@ export class QueueManager<TState extends AppState = AppState> {
           type: "exponential",
           delay: processor.config.retryPolicy?.backoffMs || 2000,
         },
+        // Set job timeout from processor configuration
+        ...(processor.config.timeout && { timeout: processor.config.timeout }),
         ...this.config.defaultJobOptions,
       },
+      // Apply rate limiter if configured
+      ...(this.config.rateLimiter && {
+        limiter: {
+          max: this.config.rateLimiter.max,
+          duration: this.config.rateLimiter.duration,
+        },
+      }),
     });
 
     this.queues.set(processor.name, queue);
@@ -88,9 +97,14 @@ export class QueueManager<TState extends AppState = AppState> {
    * Close all queues
    */
   async closeAll(): Promise<void> {
-    const closings = Array.from(this.queues.values()).map((queue) =>
-      queue.close()
-    );
+    const closings = Array.from(this.queues.values()).map(async (queue) => {
+      try {
+        await queue.close();
+      } catch (error) {
+        this.logger.warn(`Error closing queue ${queue.name}`, { error });
+      }
+    });
+
     await Promise.all(closings);
     this.queues.clear();
     this.logger.info("All queues closed");
@@ -129,5 +143,12 @@ export class QueueManager<TState extends AppState = AppState> {
 
   private getQueueName(processorName: string): string {
     return `${this.queuePrefix}_${processorName}`;
+  }
+
+  async cleanAll(): Promise<void> {
+    const queues = this.getAllQueues();
+    for (const queue of queues) {
+      await queue.clean(0, 1000);
+    }
   }
 }

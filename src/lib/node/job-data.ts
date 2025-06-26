@@ -1,5 +1,6 @@
 // src/lib/node/job-data.ts
 import { type AppState } from "../core/state";
+import { type JobsOptions } from "bullmq";
 
 /**
  * Simplified job data structure
@@ -12,10 +13,28 @@ export interface JobData<TState extends AppState> {
 }
 
 /**
- * Job options builder for consistent configuration
+ * Enhanced job data structure with context propagation
+ */
+export interface EnhancedJobData<TState extends AppState>
+  extends JobData<TState> {
+  readonly callContext?: {
+    readonly callDepth: number;
+    readonly parentExecutionId?: string;
+    readonly chainName?: string;
+    readonly chainPosition?: number;
+    readonly isRetry: boolean;
+    readonly retryAttempt: number;
+  };
+}
+
+/**
+ * Job options builder for consistent configuration with proper type safety
  */
 export class JobOptionsBuilder {
-  private options: any = {};
+  private options: JobsOptions & {
+    timeout?: number;
+    metadata?: Record<string, any>; // ✅ NEW: For BullMQ UI
+  } = {};
 
   withPriority(priority: number): this {
     this.options.priority = priority;
@@ -45,7 +64,17 @@ export class JobOptionsBuilder {
     return this;
   }
 
-  build(): any {
+  withTimeout(timeoutMs: number): this {
+    this.options.timeout = timeoutMs;
+    return this;
+  }
+
+  withMetadata(metadata: Record<string, any>): this {
+    this.options.metadata = metadata;
+    return this;
+  }
+
+  build(): JobsOptions & { timeout?: number; metadata?: Record<string, any> } {
     return { ...this.options };
   }
 }

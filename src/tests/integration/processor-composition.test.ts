@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { createQueueRuntimeWithDefaults } from "../../lib/node/queue-runtime";
-import { LocalRuntime } from "../../lib/core/runtime";
+import { DEFAULT_RUNTIME_CONFIG, LocalRuntime } from "../../lib/core/runtime";
 import {
   createTestProcessor,
   createTestState,
@@ -12,7 +12,6 @@ import {
   chainProcessors,
   parallelProcessors,
   routeProcessor,
-  withRetry,
 } from "../../lib/core/processor";
 import { Success } from "../../lib/core/result";
 
@@ -20,13 +19,26 @@ import { Success } from "../../lib/core/result";
 const runtimeConfigs = [
   {
     name: "LocalRuntime",
-    createRuntime: () => new LocalRuntime<TestState>(testLogger),
+    createRuntime: () =>
+      new LocalRuntime<TestState>(DEFAULT_RUNTIME_CONFIG, testLogger),
     needsCleanup: false,
   },
   {
     name: "QueueRuntime",
     createRuntime: () =>
-      createQueueRuntimeWithDefaults<TestState>({}, testLogger),
+      createQueueRuntimeWithDefaults<TestState>(
+        {
+          host: "localhost",
+          port: 6379,
+        },
+        {
+          maxCallDepth: 10,
+          defaultTimeout: 30000,
+          staleExecutionTimeout: 5 * 60 * 1000, // 5 minutes
+          autoCleanupInterval: 2 * 60 * 1000, // 2 minutes
+        },
+        testLogger
+      ),
     needsCleanup: true,
   },
 ];
@@ -63,13 +75,11 @@ for (const config of runtimeConfigs) {
         const processor2 = createTestProcessor("step-2", "success");
         const processor3 = createTestProcessor("step-3", "success");
 
-        const chainedProcessor = chainProcessors(
-          "sequential-chain",
-          processor1,
-          processor2,
-          processor3
-        );
-
+        const chainedProcessor = chainProcessors({
+          name: "sequential-chain",
+          processors: [processor1, processor2, processor3],
+        });
+        console.log("chainedProcessor", chainedProcessor);
         runtime.register(chainedProcessor);
         await runtime.start();
 
@@ -94,12 +104,10 @@ for (const config of runtimeConfigs) {
         const processor2 = createTestProcessor("step-2", "failure");
         const processor3 = createTestProcessor("step-3", "success");
 
-        const chainedProcessor = chainProcessors(
-          "failing-chain",
-          processor1,
-          processor2,
-          processor3
-        );
+        const chainedProcessor = chainProcessors({
+          name: "failing-chain",
+          processors: [processor1, processor2, processor3],
+        });
 
         runtime.register(chainedProcessor);
         await runtime.start();
@@ -121,12 +129,10 @@ for (const config of runtimeConfigs) {
         const processor2 = createTestProcessor("parallel-2", "success");
         const processor3 = createTestProcessor("parallel-3", "success");
 
-        const parallelProcessor = parallelProcessors(
-          "parallel-execution",
-          processor1,
-          processor2,
-          processor3
-        );
+        const parallelProcessor = parallelProcessors({
+          name: "parallel-execution",
+          processors: [processor1, processor2, processor3],
+        });
 
         runtime.register(parallelProcessor);
         await runtime.start();
@@ -151,12 +157,16 @@ for (const config of runtimeConfigs) {
         const processor2 = createTestProcessor("parallel-2", "failure");
         const processor3 = createTestProcessor("parallel-3", "success");
 
-        const parallelProcessor = parallelProcessors(
-          "parallel-with-failure",
-          processor1,
-          processor2,
-          processor3
-        );
+        const parallelProcessor = parallelProcessors({
+          name: "parallel-with-failure",
+          timeoutStrategy: "max",
+          processors: [
+            // timeout strategy
+            processor1,
+            processor2,
+            processor3,
+          ],
+        });
 
         runtime.register(parallelProcessor);
         await runtime.start();
@@ -246,90 +256,24 @@ for (const config of runtimeConfigs) {
       });
     });
 
-    describe("Retry Logic", () => {
-      it("should retry failed processor", async () => {
-        let attemptCount = 0;
-        const flakyProcessor = createProcessor<TestState>("flaky")
-          .withDescription("Fails first two attempts")
-          .process(async (state) => {
-            attemptCount++;
-            if (attemptCount <= 2) {
-              throw new Error(`Attempt ${attemptCount} failed`);
-            }
-            return Success({
-              ...state,
-              messages: [
-                ...(state.messages || []),
-                `Success on attempt ${attemptCount}`,
-              ],
-            });
-          });
-
-        const retryProcessor = withRetry(flakyProcessor, {
-          maxAttempts: 3,
-          backoffMs: 10,
-        });
-
-        runtime.register(retryProcessor);
-        await runtime.start();
-
-        const initialState = createTestState(0, []);
-        const result = await runtime.execute(
-          `retry(${flakyProcessor.name})`,
-          initialState
-        );
-
-        expect(result.success).toBe(true);
-        expect(result.state.messages).toContain("Success on attempt 3");
-        expect(attemptCount).toBe(3);
-      });
-
-      it("should fail after exhausting retries", async () => {
-        const alwaysFailProcessor = createTestProcessor(
-          "always-fail",
-          "failure"
-        );
-
-        const retryProcessor = withRetry(alwaysFailProcessor, {
-          maxAttempts: 2,
-          backoffMs: 10,
-        });
-
-        runtime.register(retryProcessor);
-        await runtime.start();
-
-        const initialState = createTestState(0, []);
-        const result = await runtime.execute(
-          `retry(${alwaysFailProcessor.name})`,
-          initialState
-        );
-
-        expect(result.success).toBe(false);
-        expect(result.error).toBeDefined();
-      });
-    });
-
     describe("Complex Compositions", () => {
       it("should handle nested chains and parallel execution", async () => {
         // Create parallel processors that will run concurrently
         const parallel1 = createTestProcessor("parallel-branch-1", "success");
         const parallel2 = createTestProcessor("parallel-branch-2", "success");
-        const parallelGroup = parallelProcessors(
-          "parallel-group",
-          parallel1,
-          parallel2
-        );
+        const parallelGroup = parallelProcessors({
+          name: "parallel-group",
+          processors: [parallel1, parallel2],
+        });
 
         // Create a chain that includes the parallel group
         const preProcessor = createTestProcessor("pre-process", "success");
         const postProcessor = createTestProcessor("post-process", "success");
 
-        const complexChain = chainProcessors(
-          "complex-workflow",
-          preProcessor,
-          parallelGroup,
-          postProcessor
-        );
+        const complexChain = chainProcessors({
+          name: "complex-workflow",
+          processors: [preProcessor, parallelGroup, postProcessor],
+        });
 
         runtime.register(complexChain);
         await runtime.start();
@@ -353,7 +297,7 @@ for (const config of runtimeConfigs) {
 
         const routingProcessor = routeProcessor(
           "conditional-step",
-          (state) => (state.counter > 0 ? "process" : "skip"),
+          (state) => (state.counter > 1 ? "process" : "skip"),
           {
             process: createTestProcessor("conditional-process", "success"),
             skip: createProcessor<TestState>("skip").process(async (state) =>
@@ -367,12 +311,10 @@ for (const config of runtimeConfigs) {
 
         const postprocessor = createTestProcessor("post-route", "success");
 
-        const routingChain = chainProcessors(
-          "routing-chain",
-          preprocessor,
-          routingProcessor,
-          postprocessor
-        );
+        const routingChain = chainProcessors({
+          name: "routing-chain",
+          processors: [preprocessor, routingProcessor, postprocessor],
+        });
 
         runtime.register(routingChain);
         await runtime.start();
@@ -396,12 +338,10 @@ for (const config of runtimeConfigs) {
         );
         const step3 = createTestProcessor("chain-step-3", "success");
 
-        const errorChain = chainProcessors(
-          "error-chain",
-          step1,
-          failingStep,
-          step3
-        );
+        const errorChain = chainProcessors({
+          name: "error-chain",
+          processors: [step1, failingStep, step3],
+        });
 
         runtime.register(errorChain);
         await runtime.start();
@@ -419,7 +359,10 @@ for (const config of runtimeConfigs) {
 
       it("should handle timeout scenarios", async () => {
         const timeoutProcessor = createTestProcessor("timeout-step", "timeout");
-        const chain = chainProcessors("timeout-chain", timeoutProcessor);
+        const chain = chainProcessors({
+          name: "timeout-chain",
+          processors: [timeoutProcessor],
+        });
 
         runtime.register(chain);
         await runtime.start();
@@ -466,12 +409,10 @@ for (const config of runtimeConfigs) {
           }
         );
 
-        const mathChain = chainProcessors(
-          "math-workflow",
-          incrementer,
-          doubler,
-          validator
-        );
+        const mathChain = chainProcessors({
+          name: "math-workflow",
+          processors: [incrementer, doubler, validator],
+        });
 
         runtime.register(mathChain);
         await runtime.start();

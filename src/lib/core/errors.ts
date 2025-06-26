@@ -71,6 +71,15 @@ export interface ErrorDetails {
   readonly timestamp: string;
 }
 
+/**
+ * Interface for chain processor errors that contain partial state
+ */
+export interface ChainError<TState = any> extends AM2ZError {
+  readonly partialState?: TState;
+  readonly completedSteps: number;
+  readonly failedProcessor: string;
+}
+
 // === Specific Error Classes ===
 
 /**
@@ -121,17 +130,24 @@ export class ProcessorNotFoundError extends AM2ZError {
 /**
  * Processor execution failures
  */
-export class ProcessorExecutionError extends AM2ZError {
+export class ProcessorExecutionError extends AM2ZError implements ChainError {
   readonly code = "PROCESSOR_EXECUTION_FAILED";
   readonly category = "execution" as const;
   readonly severity = "high" as const;
   readonly retryable = true;
+  readonly partialState?: any;
+  readonly completedSteps: number;
+  readonly failedProcessor: string;
 
   constructor(
     public readonly processorName: string,
     public readonly executionId: string,
     cause?: Error,
-    context?: Record<string, unknown>
+    context?: Record<string, unknown> & {
+      partialState?: any;
+      completedSteps?: number;
+      failedProcessor?: string;
+    }
   ) {
     // Include the underlying error message in the main message for better visibility
     const causeMessage = cause ? `: ${cause.message}` : "";
@@ -146,6 +162,10 @@ export class ProcessorExecutionError extends AM2ZError {
       },
       cause
     );
+
+    this.partialState = context?.partialState;
+    this.completedSteps = context?.completedSteps || 0;
+    this.failedProcessor = context?.failedProcessor || processorName;
   }
 }
 
@@ -257,7 +277,93 @@ export class BusinessError extends AM2ZError {
   }
 }
 
+/**
+ * Call depth exceeded errors
+ */
+export class CallDepthExceededError extends AM2ZError {
+  readonly code = "CALL_DEPTH_EXCEEDED";
+  readonly category = "execution" as const;
+  readonly severity = "high" as const;
+  readonly retryable = false;
+
+  constructor(
+    message: string,
+    public readonly maxDepth: number,
+    public readonly currentDepth: number,
+    context?: Record<string, unknown>
+  ) {
+    super(message, {
+      maxDepth,
+      currentDepth,
+      ...context,
+    });
+  }
+}
+
+/**
+ * Managed timeout utility for safe timeout handling
+ */
+export class ManagedTimeout {
+  private timeoutId?: NodeJS.Timeout;
+  private isCleared = false;
+
+  start(callback: () => void, delay: number): void {
+    this.clear();
+    this.isCleared = false;
+    this.timeoutId = setTimeout(() => {
+      if (!this.isCleared) {
+        this.timeoutId = undefined;
+        callback();
+      }
+    }, delay);
+  }
+
+  clear(): void {
+    if (this.timeoutId) {
+      clearTimeout(this.timeoutId);
+      this.timeoutId = undefined;
+    }
+    this.isCleared = true;
+  }
+
+  isActive(): boolean {
+    return this.timeoutId !== undefined && !this.isCleared;
+  }
+}
+
 // === Error Utilities ===
+
+/**
+ * Type guard to check if error is a chain error with partial state
+ */
+export function isChainError<TState = any>(
+  error: AM2ZError
+): error is ChainError<TState> {
+  return (
+    "partialState" in error &&
+    "completedSteps" in error &&
+    "failedProcessor" in error
+  );
+}
+
+/**
+ * Extract partial state from any error in a standardized way
+ */
+export function extractPartialState<TState = any>(
+  error: AM2ZError
+): TState | undefined {
+  if (isChainError<TState>(error)) {
+    return error.partialState;
+  }
+
+  // Legacy fallback for existing error patterns
+  const anyError = error as any;
+  return (
+    anyError.context?.partialState ||
+    anyError.partialState ||
+    anyError.__partialState
+  );
+}
 
 /**
  * Type guard to check if error is retryable
@@ -300,14 +406,23 @@ export function extractErrorDetails(error: Error): ErrorDetails {
 export function wrapAsProcessorError(
   error: Error,
   processorName: string,
-  executionId: string
+  executionId: string,
+  partialState?: any,
+  completedSteps?: number
 ): ProcessorExecutionError {
   if (error instanceof AM2ZError) {
-    return new ProcessorExecutionError(processorName, executionId, error);
+    return new ProcessorExecutionError(processorName, executionId, error, {
+      partialState,
+      completedSteps,
+      failedProcessor: processorName,
+    });
   }
 
   return new ProcessorExecutionError(processorName, executionId, error, {
     originalErrorName: error.name,
+    partialState,
+    completedSteps,
+    failedProcessor: processorName,
   });
 }
 
