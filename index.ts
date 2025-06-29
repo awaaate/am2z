@@ -73,7 +73,7 @@ export {
   chainProcessors,
   parallelProcessors,
   routeProcessor,
-  withRetry,
+  batchProcessor,
 
   // Runtime System
   type ProcessorRuntime,

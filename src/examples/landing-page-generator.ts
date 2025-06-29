@@ -1,3 +1,5 @@
+#!/usr/bin/env bun
+
 import { openai } from "@ai-sdk/openai";
 import { generateText, generateObject } from "ai";
 import { z } from "zod";
@@ -816,9 +818,64 @@ export async function generateLandingPage(userRequest: string) {
   }
 }
 
+// === CLI INTERFACE ===
+async function main() {
+  const args = process.argv.slice(2);
+
+  if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
+    console.log(`
+🚀 Generador de Landing Pages AM2Z
+
+Uso:
+  bun am2z-landing "descripción de tu landing page"
+  
+Ejemplo:
+  bun am2z-landing "Necesito una landing page para mi startup de IA"
+  
+Opciones:
+  --help, -h     Muestra esta ayuda
+  --output, -o   Archivo de salida (default: landing-[timestamp].html)
+  --verbose, -v  Modo verbose
+    `);
+    return;
+  }
+
+  const userRequest = args[0];
+  if (!userRequest) {
+    console.error(
+      "❌ Error: Debes proporcionar una descripción para la landing page"
+    );
+    return;
+  }
+
+  const outputFlag =
+    args.indexOf("--output") !== -1
+      ? args.indexOf("--output")
+      : args.indexOf("-o");
+  const outputFile =
+    outputFlag !== -1 && args[outputFlag + 1]
+      ? args[outputFlag + 1]
+      : `landing-${new Date().toISOString().replace(/[:.]/g, "-")}.html`;
+
+  console.log(`🎯 Generando landing page: "${userRequest}"`);
+  console.log(`📁 Archivo de salida: ${outputFile}`);
+
+  const result = await generateLandingPage(userRequest);
+
+  if (result.success && result.state.finalHTML) {
+    try {
+      await Bun.write(outputFile, result.state.finalHTML);
+      console.log(`✅ Landing page guardada en: ${outputFile}`);
+      console.log(`🌐 Abre el archivo en tu navegador para verla`);
+    } catch (error) {
+      console.error("❌ Error guardando archivo:", error);
+    }
+  } else {
+    console.error("❌ Error generando la landing page");
+  }
+}
+
 // === EJEMPLO DE USO ===
 if (import.meta.main) {
-  await generateLandingPage(
-    "Necesito una landing page para mi startup de inteligencia artificial que ayuda a empresas a automatizar su servicio al cliente. Nuestro producto usa chatbots avanzados y reduce hasta 80% el tiempo de respuesta. Target: CTOs y gerentes de tecnología de empresas medianas a grandes. Queremos conversiones para demos gratuitas."
-  );
+  await main();
 }

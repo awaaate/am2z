@@ -20,9 +20,10 @@
     }
   },
   "scripts": {
-    "build": "bun run clean && bun run type-check && bun run build:js",
+    "build": "bun run clean && bun run type-check && bun run build:js && bun run build:types",
     "build:js": "bun build index.ts --outdir dist --target node --format esm --splitting --minify",
-    "type-check": "tsc --noEmit",
+    "build:types": "tsc --emitDeclarationOnly --declaration --outDir dist",
+    "type-check": "tsc --noEmit --skipLibCheck",
     "clean": "rm -rf dist",
     "dev": "bun run --watch src/examples/effect-pipeline.ts",
     "example:functional": "bun run src/examples/functional-pipeline.ts",
@@ -57,11 +58,9 @@
     "@bull-board/express": "^6.10.1",
     "@bull-board/ui": "^6.10.1",
     "ai": "^4.3.16",
-    "bullmq": "^5.56.0",
-    "effect": "^3.0.0",
     "express": "^5.1.0",
-    "immer": "^10.0.3",
     "ioredis": "^5.6.1",
+    "bullmq": "^5.56.0",
     "zod": "^3.25.67"
   },
   "devDependencies": {

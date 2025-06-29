@@ -4,6 +4,15 @@
 /**
  * Base error class for all AM2Z errors
  * Provides consistent structure and better debugging
+ *
+ * @example
+ * class MyError extends AM2ZError {
+ *   readonly code = "MY_ERROR";
+ *   readonly category = "business";
+ *   readonly severity = "medium";
+ *   readonly retryable = false;
+ *   constructor(msg: string) { super(msg); }
+ * }
  */
 export abstract class AM2ZError extends Error {
   abstract readonly code: string;
@@ -27,6 +36,7 @@ export abstract class AM2ZError extends Error {
 
   /**
    * Serialize error for logging/debugging
+   * @returns ErrorDetails object.
    */
   toJSON(): ErrorDetails {
     return {
@@ -43,6 +53,17 @@ export abstract class AM2ZError extends Error {
   }
 }
 
+/**
+ * Error category for AM2Z errors
+ * - validation: Input validation failures
+ * - execution: Runtime execution errors
+ * - timeout: Operation timeouts
+ * - resource: Resource exhaustion (memory, connections)
+ * - network: Network/communication failures
+ * - configuration: Setup/config errors
+ * - auth: Authentication/authorization
+ * - business: Domain-specific business logic errors
+ */
 export type ErrorCategory =
   | "validation" // Input validation failures
   | "execution" // Runtime execution errors
@@ -53,12 +74,22 @@ export type ErrorCategory =
   | "auth" // Authentication/authorization
   | "business"; // Domain-specific business logic errors
 
+/**
+ * Error severity for AM2Z errors
+ * - low: Minor issues, system continues
+ * - medium: Notable issues, some functionality affected
+ * - high: Major issues, significant functionality affected
+ * - critical: System-breaking issues
+ */
 export type ErrorSeverity =
   | "low" // Minor issues, system continues
   | "medium" // Notable issues, some functionality affected
   | "high" // Major issues, significant functionality affected
   | "critical"; // System-breaking issues
 
+/**
+ * Structured error details for logging and debugging
+ */
 export interface ErrorDetails {
   readonly name: string;
   readonly code: string;
@@ -84,6 +115,9 @@ export interface ChainError<TState = any> extends AM2ZError {
 
 /**
  * Validation errors for input data
+ *
+ * @example
+ * throw new ValidationError("email", "foo@bar", "Invalid email");
  */
 export class ValidationError extends AM2ZError {
   readonly category = "validation" as const;
@@ -109,6 +143,9 @@ export class ValidationError extends AM2ZError {
 
 /**
  * Processor not found errors
+ *
+ * @example
+ * throw new ProcessorNotFoundError("myProc", ["a", "b"]);
  */
 export class ProcessorNotFoundError extends AM2ZError {
   readonly code = "PROCESSOR_NOT_FOUND";
@@ -129,6 +166,9 @@ export class ProcessorNotFoundError extends AM2ZError {
 
 /**
  * Processor execution failures
+ *
+ * @example
+ * throw new ProcessorExecutionError("proc", "exec-1", new Error("fail"));
  */
 export class ProcessorExecutionError extends AM2ZError implements ChainError {
   readonly code = "PROCESSOR_EXECUTION_FAILED";
@@ -171,6 +211,9 @@ export class ProcessorExecutionError extends AM2ZError implements ChainError {
 
 /**
  * Timeout errors
+ *
+ * @example
+ * throw new TimeoutError("fetchData", 5000);
  */
 export class TimeoutError extends AM2ZError {
   readonly code = "OPERATION_TIMEOUT";
@@ -193,6 +236,9 @@ export class TimeoutError extends AM2ZError {
 
 /**
  * Resource exhaustion errors
+ *
+ * @example
+ * throw new ResourceError("memory", 1024, 2048);
  */
 export class ResourceError extends AM2ZError {
   readonly code = "RESOURCE_EXHAUSTED";
@@ -217,6 +263,9 @@ export class ResourceError extends AM2ZError {
 
 /**
  * Network/communication errors
+ *
+ * @example
+ * throw new NetworkError("https://api", 500);
  */
 export class NetworkError extends AM2ZError {
   readonly code = "NETWORK_ERROR";
@@ -240,6 +289,9 @@ export class NetworkError extends AM2ZError {
 
 /**
  * Configuration errors
+ *
+ * @example
+ * throw new ConfigurationError("REDIS_URL", "Missing value");
  */
 export class ConfigurationError extends AM2ZError {
   readonly code = "INVALID_CONFIGURATION";
@@ -262,6 +314,9 @@ export class ConfigurationError extends AM2ZError {
 
 /**
  * Business logic errors
+ *
+ * @example
+ * throw new BusinessError("BUSINESS_RULE", "Not allowed");
  */
 export class BusinessError extends AM2ZError {
   readonly category = "business" as const;
@@ -279,6 +334,9 @@ export class BusinessError extends AM2ZError {
 
 /**
  * Call depth exceeded errors
+ *
+ * @example
+ * throw new CallDepthExceededError("Too deep", 10, 15);
  */
 export class CallDepthExceededError extends AM2ZError {
   readonly code = "CALL_DEPTH_EXCEEDED";
@@ -334,7 +392,11 @@ export class ManagedTimeout {
 // === Error Utilities ===
 
 /**
- * Type guard to check if error is a chain error with partial state
+ * Check if an error is a ChainError (contains partial state)
+ * @param error - The error to check
+ * @returns True if error is ChainError
+ * @example
+ * if (isChainError(err)) { console.log(err.partialState); }
  */
 export function isChainError<TState = any>(
   error: AM2ZError
@@ -347,7 +409,11 @@ export function isChainError<TState = any>(
 }
 
 /**
- * Extract partial state from any error in a standardized way
+ * Extract partial state from a ChainError
+ * @param error - The error to extract from
+ * @returns The partial state or undefined
+ * @example
+ * const state = extractPartialState(err);
  */
 export function extractPartialState<TState = any>(
   error: AM2ZError
@@ -366,21 +432,33 @@ export function extractPartialState<TState = any>(
 }
 
 /**
- * Type guard to check if error is retryable
+ * Check if an error is retryable
+ * @param error - The error to check
+ * @returns True if retryable
+ * @example
+ * if (isRetryableError(err)) { /* ... * / }
  */
 export function isRetryableError(error: Error): boolean {
   return error instanceof AM2ZError && error.retryable;
 }
 
 /**
- * Type guard to check if error is critical
+ * Check if an error is critical
+ * @param error - The error to check
+ * @returns True if severity is 'critical'
+ * @example
+ * if (isCriticalError(err)) { /* ... * / }
  */
 export function isCriticalError(error: Error): boolean {
   return error instanceof AM2ZError && error.severity === "critical";
 }
 
 /**
- * Extract error details for logging
+ * Extract structured error details for logging
+ * @param error - The error to extract from
+ * @returns ErrorDetails object
+ * @example
+ * const details = extractErrorDetails(err);
  */
 export function extractErrorDetails(error: Error): ErrorDetails {
   if (error instanceof AM2ZError) {
@@ -401,7 +479,15 @@ export function extractErrorDetails(error: Error): ErrorDetails {
 }
 
 /**
- * Create a processor execution error from any error
+ * Wrap a generic error as a ProcessorExecutionError
+ * @param error - The error to wrap
+ * @param processorName - Name of the processor
+ * @param executionId - Execution ID
+ * @param partialState - Optional partial state
+ * @param completedSteps - Optional completed steps
+ * @returns ProcessorExecutionError
+ * @example
+ * throw wrapAsProcessorError(err, "proc", "exec-1");
  */
 export function wrapAsProcessorError(
   error: Error,

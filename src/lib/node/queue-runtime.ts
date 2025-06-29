@@ -146,9 +146,7 @@ export class QueueRuntime<TState extends AppState = AppState>
       queueConfig: processor.config.queueConfig,
     });
 
-    // Create dedicated queue for this processor
-    this.queueManager.createQueue(processor);
-    //if the procesor has deps, register them first
+    // Register dependencies if any
     if (processor.deps) {
       for (const dep of processor.deps) {
         this.register(dep as unknown as ProcessorDefinition<TState>);
@@ -156,6 +154,72 @@ export class QueueRuntime<TState extends AppState = AppState>
     }
 
     return this;
+  }
+
+  registerMany(processors: ProcessorDefinition<TState>[]): this {
+    for (const processor of processors) {
+      this.register(processor);
+    }
+    return this;
+  }
+
+  /**
+   * Synchronize all registered processors - creates queues, workers and queue events
+   * This is the same logic used in start() but can be called independently
+   * Only creates infrastructure that doesn't already exist
+   */
+  async syncProcessors(): Promise<void> {
+    this.logger.info("Synchronizing processors...");
+
+    // Create infrastructure for all registered processors in parallel
+    const syncPromises = Array.from(this.processors.values()).map(
+      async (processor) => {
+        // ✅ 1. Check if queue already exists
+        const existingQueue = this.queueManager.getQueue(processor.name);
+        if (!existingQueue) {
+          this.queueManager.createQueue(processor);
+          this.logger.debug(`Created queue for: ${processor.name}`);
+        } else {
+          this.logger.debug(`Queue already exists for: ${processor.name}`);
+        }
+
+        // ✅ 2. Check if worker already exists
+        const existingWorker = this.workerManager.getWorker(processor.name);
+        if (!existingWorker) {
+          await this.workerManager.createWorker(processor);
+          this.logger.debug(`Created worker for: ${processor.name}`);
+        } else {
+          this.logger.debug(`Worker already exists for: ${processor.name}`);
+        }
+
+        // ✅ 3. Check if queue events already setup
+        const hasQueueEvents = this.queueEvents.has(processor.name);
+        if (
+          this.config.monitoring?.enableQueueEvents !== false &&
+          !hasQueueEvents
+        ) {
+          this.setupQueueEvents(processor.name);
+          this.logger.debug(`Setup queue events for: ${processor.name}`);
+        } else if (hasQueueEvents) {
+          this.logger.debug(
+            `Queue events already setup for: ${processor.name}`
+          );
+        }
+      }
+    );
+    await Promise.all(syncPromises);
+
+    this.logger.info("Processor synchronization completed", {
+      processorsCount: this.processors.size,
+    });
+  }
+
+  isProcessorRegistered(processorName: string): boolean {
+    return this.processors.has(processorName);
+  }
+
+  getRegisteredProcessorNames(): string[] {
+    return Array.from(this.processors.keys());
   }
 
   getQueues(): Queue[] {
@@ -181,18 +245,8 @@ export class QueueRuntime<TState extends AppState = AppState>
 
     this.logger.info("Starting distributed runtime...");
 
-    // Start workers for all registered processors in parallel
-    const workerPromises = Array.from(this.processors.values()).map(
-      async (processor) => {
-        await this.workerManager.createWorker(processor);
-
-        // Setup queue events if monitoring enabled
-        if (this.config.monitoring?.enableQueueEvents !== false) {
-          this.setupQueueEvents(processor.name);
-        }
-      }
-    );
-    await Promise.all(workerPromises);
+    // Sync all processors (workers + queue events)
+    await this.syncProcessors();
 
     // Setup monitoring if enabled
     if (this.config.monitoring?.enableMetrics) {

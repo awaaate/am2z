@@ -2,8 +2,18 @@
 // Clean, type-safe state management with immutability
 
 /**
- * Base state that all AM2Z states must extend
- * Provides essential metadata for tracking and debugging
+ * Base state that all AM2Z states must extend.
+ * Provides essential metadata for tracking and debugging.
+ *
+ * @example
+ * const state: AppState = {
+ *   metadata: {
+ *     version: 1,
+ *     sessionId: "abc",
+ *     lastUpdated: "2024-06-26T00:00:00Z",
+ *     createdAt: "2024-06-26T00:00:00Z"
+ *   }
+ * };
  */
 export interface AppState {
   readonly metadata: {
@@ -16,6 +26,10 @@ export interface AppState {
 
 /**
  * Wraps a state object with a version for optimistic locking.
+ *
+ * @template T - The state type.
+ * @example
+ * const versioned: Versioned<MyState> = { state: myState, version: 2 };
  */
 export type Versioned<T> = {
   state: T;
@@ -24,6 +38,8 @@ export type Versioned<T> = {
 
 /**
  * Manages the lifecycle of a state object, providing methods for safe concurrent updates.
+ *
+ * @template T - The state type (must extend AppState).
  */
 export interface StateManager<T extends AppState> {
   /**
@@ -51,21 +67,33 @@ export interface StateManager<T extends AppState> {
 }
 
 /**
- * State with branded type for compile-time safety
- * Prevents mixing different state types accidentally
+ * State with branded type for compile-time safety.
+ * Prevents mixing different state types accidentally.
+ *
+ * @template TBrand - The brand string.
+ * @template TData - The data type.
+ * @example
+ * type UserState = BrandedState<"user", { name: string }>;
  */
 export type BrandedState<TBrand extends string, TData> = AppState & {
   readonly __brand: TBrand;
 } & TData;
 
 /**
- * Non-empty array type for better type safety
- * Eliminates runtime checks for empty arrays
+ * Non-empty array type for better type safety.
+ * Eliminates runtime checks for empty arrays.
+ *
+ * @template T - The element type.
+ * @example
+ * const arr: NonEmptyArray<number> = [1, 2, 3];
  */
 export type NonEmptyArray<T> = [T, ...T[]];
 
 /**
- * Create a non-empty array with runtime validation
+ * Create a non-empty array with runtime validation.
+ * @throws If the array is empty.
+ * @example
+ * const arr = createNonEmptyArray([1, 2, 3]);
  */
 export function createNonEmptyArray<T>(items: T[]): NonEmptyArray<T> {
   if (items.length === 0) {
@@ -75,7 +103,14 @@ export function createNonEmptyArray<T>(items: T[]): NonEmptyArray<T> {
 }
 
 /**
- * Type guard for branded states
+ * Type guard for branded states.
+ * @param state - The state to check.
+ * @param brand - The expected brand string.
+ * @returns True if the state is branded with the given brand.
+ * @example
+ * if (isBrandedState(state, "user")) {
+ *   // state is BrandedState<"user", any>
+ * }
  */
 export function isBrandedState<TBrand extends string>(
   state: AppState,
@@ -85,7 +120,12 @@ export function isBrandedState<TBrand extends string>(
 }
 
 /**
- * Helper to create initial app state
+ * Helper to create initial app state.
+ * @param sessionId - The session ID.
+ * @param additionalData - Optional additional properties.
+ * @returns A new AppState object.
+ * @example
+ * const state = createAppState("session-1", { foo: 123 });
  */
 export function createAppState(
   sessionId: string,
@@ -105,7 +145,12 @@ export function createAppState(
 }
 
 /**
- * Update state metadata (called automatically by processors)
+ * Update state metadata (called automatically by processors).
+ * Increments version and updates lastUpdated timestamp.
+ * @param state - The state to update.
+ * @returns The updated state.
+ * @example
+ * const updated = updateStateMetadata(state);
  */
 export function updateStateMetadata<T extends AppState>(state: T): T {
   return {
