@@ -609,6 +609,8 @@ interface BatchProcessorInput<
   processorName: string;
   payloads: TPayload;
   mergeFunction?: (results: TState[], initialState: TState) => TState;
+  sessionId?: string; // Optional explicit session ID for isolation
+  isolateSession?: boolean; // Whether to create session-specific queues
 }
 
 /**
@@ -630,6 +632,8 @@ export function batchProcessor<TState extends AppState = AppState>({
   processorName,
   mergeFunction = defaultMergeFunction,
   payloads,
+  sessionId,
+  isolateSession = false,
 }: BatchProcessorInput<TState>): ProcessorDefinition<TState> {
   const times = payloads.length;
   if (times <= 0) {
@@ -659,10 +663,14 @@ export function batchProcessor<TState extends AppState = AppState>({
           "payloads must be an array of payloads"
         );
       }
-      const sessionId = context.meta.sessionId + `-${index}`;
+      
+      // Use explicit session ID if provided, otherwise create batch-specific session IDs
+      const batchSessionId = sessionId 
+        ? (isolateSession ? `${sessionId}-batch-${index}` : sessionId)
+        : context.meta.sessionId + `-${index}`;
 
       return context.call(processorName, payload as TState, {
-        sessionId,
+        sessionId: batchSessionId,
       });
     });
 

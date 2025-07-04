@@ -27,6 +27,7 @@ export interface WorkerConfig {
 
 export class WorkerManager<TState extends AppState = AppState> {
   private workers = new Map<string, Worker>();
+  private sessionWorkers = new Map<string, Set<string>>(); // Track workers per session
   private executor: ProcessorExecutor<TState>;
   private contextFactory = new ContextFactory<TState>();
   private metadataFactory = new MetadataFactory();
@@ -68,8 +69,12 @@ export class WorkerManager<TState extends AppState = AppState> {
   /**
    * Create worker for a processor
    */
-  async createWorker(processor: ProcessorDefinition<TState>): Promise<void> {
-    const queueName = this.getQueueName(processor.name);
+  async createWorker(
+    processor: ProcessorDefinition<TState>,
+    sessionId?: string
+  ): Promise<void> {
+    const workerKey = this.getWorkerKey(processor.name, sessionId);
+    const queueName = this.getQueueName(processor.name, sessionId);
 
     const worker = new Worker(
       queueName,
@@ -127,11 +132,20 @@ export class WorkerManager<TState extends AppState = AppState> {
       }
     );
 
-    this.workers.set(processor.name, worker);
+    this.workers.set(workerKey, worker);
     this.setupWorkerEvents(worker, processor.name);
+
+    // Track session-specific workers
+    if (sessionId) {
+      if (!this.sessionWorkers.has(sessionId)) {
+        this.sessionWorkers.set(sessionId, new Set());
+      }
+      this.sessionWorkers.get(sessionId)!.add(workerKey);
+    }
 
     this.logger.debug(`Created worker for processor: ${processor.name}`, {
       queueName,
+      sessionId,
       concurrency: worker.opts.concurrency,
     });
   }
@@ -181,7 +195,10 @@ export class WorkerManager<TState extends AppState = AppState> {
   /**
    * Setup worker event listeners
    */
-  private setupWorkerEvents(worker: Worker, processorName: string): void {
+  private setupWorkerEvents(
+    worker: Worker,
+    processorName: string
+  ): void {
     worker.on("completed", (job, returnvalue) => {
       const executionTime = Date.now() - job.processedOn!;
       this.logger.debug(`Worker - job completed: ${job.id}`, {
@@ -198,7 +215,7 @@ export class WorkerManager<TState extends AppState = AppState> {
       this.eventEmitter("processor:job:completed", {
         jobId: job.id,
         processorName,
-        result: returnvalue, // ✅ Usar 'result' en lugar de 'returnvalue'
+        result: returnvalue,
         executionTime,
         executionId: job.data?.executionId || job.id,
       });
@@ -219,8 +236,8 @@ export class WorkerManager<TState extends AppState = AppState> {
       this.eventEmitter("processor:job:failed", {
         jobId: job?.id,
         processorName,
-        error: err, // ✅ Pasar el error completo, no solo el mensaje
-        result: (err as any).jobResult, // Pass the full result
+        error: err,
+        result: (err as any).jobResult,
         executionId: job?.data?.executionId || job?.id,
         attempts: job?.attemptsMade,
       });
@@ -243,19 +260,32 @@ export class WorkerManager<TState extends AppState = AppState> {
   /**
    * Get worker for processor
    */
-  getWorker(processorName: string): Worker | undefined {
-    return this.workers.get(processorName);
+  getWorker(processorName: string, sessionId?: string): Worker | undefined {
+    const workerKey = this.getWorkerKey(processorName, sessionId);
+    return this.workers.get(workerKey);
   }
 
   /**
    * Remove worker
    */
-  async removeWorker(processorName: string): Promise<void> {
-    const worker = this.workers.get(processorName);
+  async removeWorker(processorName: string, sessionId?: string): Promise<void> {
+    const workerKey = this.getWorkerKey(processorName, sessionId);
+    const worker = this.workers.get(workerKey);
     if (worker) {
       await worker.close();
-      this.workers.delete(processorName);
-      this.logger.debug(`Removed worker for processor: ${processorName}`);
+      this.workers.delete(workerKey);
+
+      // Clean up session tracking
+      if (sessionId && this.sessionWorkers.has(sessionId)) {
+        this.sessionWorkers.get(sessionId)!.delete(workerKey);
+        if (this.sessionWorkers.get(sessionId)!.size === 0) {
+          this.sessionWorkers.delete(sessionId);
+        }
+      }
+
+      this.logger.debug(`Removed worker for processor: ${processorName}`, {
+        sessionId,
+      });
     }
   }
 
@@ -277,7 +307,46 @@ export class WorkerManager<TState extends AppState = AppState> {
     this.logger.info("All workers closed");
   }
 
-  private getQueueName(processorName: string): string {
-    return `${this.queuePrefix}_${processorName}`;
+  private getQueueName(processorName: string, sessionId?: string): string {
+    const baseName = `${this.queuePrefix}_${processorName}`;
+    return sessionId ? `${baseName}_${sessionId}` : baseName;
+  }
+
+  private getWorkerKey(processorName: string, sessionId?: string): string {
+    return sessionId ? `${processorName}_${sessionId}` : processorName;
+  }
+
+  /**
+   * Clean up all workers for a specific session
+   */
+  async cleanSession(sessionId: string): Promise<void> {
+    const sessionWorkerKeys = this.sessionWorkers.get(sessionId);
+    if (!sessionWorkerKeys) {
+      return;
+    }
+
+    const cleanupPromises = Array.from(sessionWorkerKeys).map(
+      async (workerKey) => {
+        const worker = this.workers.get(workerKey);
+        if (worker) {
+          await worker.close();
+          this.workers.delete(workerKey);
+        }
+      }
+    );
+
+    await Promise.all(cleanupPromises);
+    this.sessionWorkers.delete(sessionId);
+
+    this.logger.info(`Cleaned up session workers: ${sessionId}`, {
+      cleanedWorkers: sessionWorkerKeys.size,
+    });
+  }
+
+  /**
+   * Get all sessions with active workers
+   */
+  getActiveSessions(): string[] {
+    return Array.from(this.sessionWorkers.keys());
   }
 }

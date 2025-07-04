@@ -9,6 +9,7 @@ export interface PendingExecution<TState extends AppState> {
   reject: (error: Error) => void;
   timeout: ManagedTimeout;
   createdAt: number;
+  sessionId?: string;
 }
 
 export class ResultCollector<
@@ -34,7 +35,8 @@ export class ResultCollector<
    */
   waitForResult(
     executionId: string,
-    timeoutMs?: number
+    timeoutMs?: number,
+    sessionId?: string
   ): Promise<ProcessorResult<TState>> {
     this.logger.debug(`[RESULT] Waiting for executionId: ${executionId}`);
 
@@ -47,6 +49,7 @@ export class ResultCollector<
         reject,
         timeout: safeTimeout,
         createdAt,
+        sessionId,
       };
       this.pendingExecutions.set(executionId, pendingExecution);
 
@@ -252,6 +255,32 @@ export class ResultCollector<
     this.removeAllListeners();
 
     this.logger.info("ResultCollector cleanup completed");
+  }
+
+  /**
+   * Clean up executions for a specific session
+   */
+  cleanupSession(sessionId: string): void {
+    let cleanedCount = 0;
+    const toDelete: string[] = [];
+
+    for (const [executionId, pending] of this.pendingExecutions) {
+      // Check if execution belongs to this session (simple prefix check)
+      if (executionId.includes(sessionId) || pending.sessionId === sessionId) {
+        pending.timeout.clear();
+        pending.reject(
+          new Error(`Session ${sessionId} cleanup - session terminated`)
+        );
+        toDelete.push(executionId);
+        cleanedCount++;
+      }
+    }
+
+    toDelete.forEach(id => this.pendingExecutions.delete(id));
+
+    if (cleanedCount > 0) {
+      this.logger.info(`Cleaned up ${cleanedCount} executions for session: ${sessionId}`);
+    }
   }
 
   /**

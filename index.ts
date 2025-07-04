@@ -1,4 +1,4 @@
-// AM2Z v4.0 - A Clean, Type-Safe Framework for Building AI Processor Systems
+// AM2Z v4.0.1 - A Clean, Type-Safe Framework for Building AI Processor Systems
 // Simplified architecture inspired by functional programming and React patterns
 
 // === Core Framework ===

@@ -328,7 +328,7 @@ export class QueueRuntime<TState extends AppState = AppState>
       });
 
       // Wait for result via events (timeout manejado por ProcessorExecutor)
-      const result = await this.resultCollector.waitForResult(executionId);
+      const result = await this.resultCollector.waitForResult(executionId, undefined, sessionId);
 
       // Update stats for successful/failed jobs (but don't modify runningJobs here)
       if (result.success) {
@@ -420,7 +420,7 @@ export class QueueRuntime<TState extends AppState = AppState>
     // Wait for all results using Promise.allSettled for better error handling
     const resultPromises = executionData.map(async ({ executionId, state }) => {
       try {
-        const result = await this.resultCollector.waitForResult(executionId);
+        const result = await this.resultCollector.waitForResult(executionId, undefined, sessionId);
 
         // Update stats
         if (result.success) {
@@ -598,7 +598,7 @@ export class QueueRuntime<TState extends AppState = AppState>
         chainName: callContext?.chainName,
       });
 
-      const result = await this.resultCollector.waitForResult(executionId);
+      const result = await this.resultCollector.waitForResult(executionId, undefined, sessionId);
 
       if (result.success) {
         this.stats.completedJobs++;
@@ -689,6 +689,177 @@ export class QueueRuntime<TState extends AppState = AppState>
     };
   }
 
+  // === Session Management ===
+  
+  /**
+   * Execute processor with session isolation
+   */
+  async executeInSession(
+    processorName: string,
+    state: TState,
+    sessionId: string
+  ): Promise<ProcessorResult<TState>> {
+    // Create session-specific infrastructure if needed
+    const processor = this.processors.get(processorName);
+    if (!processor) {
+      const availableProcessors = Array.from(this.processors.keys());
+      const error = new ProcessorNotFoundError(processorName, availableProcessors);
+      return { 
+        state, 
+        executionTime: 0, 
+        success: false, 
+        error, 
+        metadata: this.metadataFactory.createMetadata(
+          processorName, 
+          sessionId, 
+          'failed', 
+          Date.now(), 
+          1
+        )
+      };
+    }
+
+    // Ensure session-specific queue and worker exist
+    await this.ensureSessionInfrastructure(processor, sessionId);
+
+    // Execute with session-specific queue
+    const sessionQueue = this.queueManager.getQueue(processorName, sessionId);
+    if (!sessionQueue) {
+      throw new Error(`Session queue not found for processor: ${processorName}, session: ${sessionId}`);
+    }
+
+    const executionId = this.metadataFactory.generateExecutionId(processorName);
+    this.stats.runningJobs++;
+
+    try {
+      // Save state to Redis with session isolation
+      await this.stateManager.set(sessionId, state);
+
+      // Create job data with session context
+      const jobData: JobData<TState> = {
+        processorName,
+        state,
+        sessionId,
+        executionId,
+      };
+
+      // Build job options
+      const jobOptions = new JobOptionsBuilder()
+        .withJobId(executionId)
+        .withPriority(processor.config.queueConfig?.priority || 0)
+        .withAttempts(processor.config.retryPolicy?.maxAttempts || 3)
+        .withBackoff(processor.config.retryPolicy?.backoffMs || 2000)
+        .build();
+
+      // Add job to session-specific queue
+      await sessionQueue.add(processorName, jobData, jobOptions);
+
+      // Wait for result
+      const result = await this.resultCollector.waitForResult(executionId, undefined, sessionId);
+
+      if (result.success) {
+        this.stats.completedJobs++;
+      } else {
+        this.stats.failedJobs++;
+      }
+
+      return result;
+    } finally {
+      this.stats.runningJobs--;
+    }
+  }
+
+  /**
+   * Stop and clean up a specific session
+   */
+  async stopSession(sessionId: string): Promise<void> {
+    this.logger.info(`Stopping session: ${sessionId}`);
+
+    try {
+      // Clean up session-specific workers and queues
+      await Promise.all([
+        this.workerManager.cleanSession(sessionId),
+        this.queueManager.cleanSession(sessionId),
+      ]);
+
+      // Clean up session-specific result collection
+      this.resultCollector.cleanupSession(sessionId);
+
+      // Note: StateManager doesn't provide delete method
+      // Session state will be cleaned up by Redis TTL or manual cleanup
+      this.logger.debug(`Session state cleanup skipped for: ${sessionId} (no delete method available)`);
+
+      this.logger.info(`Session stopped: ${sessionId}`);
+    } catch (error) {
+      this.logger.error(`Failed to stop session: ${sessionId}`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Get statistics for a specific session
+   */
+  async getSessionStats(sessionId: string): Promise<Record<string, any>> {
+    return await this.queueManager.getQueueStats(undefined, sessionId);
+  }
+
+  /**
+   * Get all active sessions
+   */
+  getActiveSessions(): string[] {
+    const queueSessions = this.queueManager.getActiveSessions();
+    const workerSessions = this.workerManager.getActiveSessions();
+    
+    // Combine and deduplicate
+    const allSessions = new Set([...queueSessions, ...workerSessions]);
+    return Array.from(allSessions);
+  }
+
+  /**
+   * Clean up all sessions
+   */
+  async cleanAllSessions(): Promise<void> {
+    const activeSessions = this.getActiveSessions();
+    
+    const cleanupPromises = activeSessions.map(sessionId => 
+      this.stopSession(sessionId).catch(error => 
+        this.logger.warn(`Failed to clean session ${sessionId}`, { error })
+      )
+    );
+
+    await Promise.all(cleanupPromises);
+    this.logger.info(`Cleaned up ${activeSessions.length} sessions`);
+  }
+
+  /**
+   * Ensure session-specific infrastructure exists
+   */
+  private async ensureSessionInfrastructure(
+    processor: ProcessorDefinition<TState>,
+    sessionId: string
+  ): Promise<void> {
+    // Check if session-specific queue exists
+    const existingQueue = this.queueManager.getQueue(processor.name, sessionId);
+    if (!existingQueue) {
+      this.queueManager.createQueue(processor, sessionId);
+    }
+
+    // Check if session-specific worker exists
+    const existingWorker = this.workerManager.getWorker(processor.name, sessionId);
+    if (!existingWorker) {
+      await this.workerManager.createWorker(processor, sessionId);
+    }
+
+    // Setup session-specific queue events if monitoring is enabled
+    const sessionQueueKey = `${processor.name}_${sessionId}`;
+    if (
+      this.config.monitoring?.enableQueueEvents !== false &&
+      !this.queueEvents.has(sessionQueueKey)
+    ) {
+      this.setupQueueEvents(processor.name, sessionId);
+    }
+  }
+
   // === Event System ===
   on(eventType: string, handler: (data: unknown) => void): void {
     if (!this.eventHandlers.has(eventType)) {
@@ -729,7 +900,7 @@ export class QueueRuntime<TState extends AppState = AppState>
   }
 
   private setupEventListeners(): void {
-    // ✅ CORRECCIÓN: Escuchar los eventos correctos que emite el worker
+    // Listen to the correct events emitted by the worker
     this.on("processor:job:completed", (data: any) => {
       this.logger.debug("Forwarding job:completed to ResultCollector", {
         executionId: data.executionId,
@@ -739,7 +910,7 @@ export class QueueRuntime<TState extends AppState = AppState>
       // Forward to result collector with the correct event name
       this.resultCollector.emit("job:completed", {
         executionId: data.executionId,
-        result: data.result, // El worker ya envía el resultado completo
+        result: data.result, // Worker already sends the complete result
       });
     });
 
@@ -762,21 +933,25 @@ export class QueueRuntime<TState extends AppState = AppState>
     });
   }
 
-  private setupQueueEvents(processorName: string): void {
-    const queueName = `${this.config.queuePrefix || "am2z"}_${processorName}`;
+  private setupQueueEvents(processorName: string, sessionId?: string): void {
+    const queueName = sessionId 
+      ? `${this.config.queuePrefix || "am2z"}_${processorName}_${sessionId}`
+      : `${this.config.queuePrefix || "am2z"}_${processorName}`;
 
     const queueEvents = new QueueEvents(queueName, {
       connection: this.connectionManager.getConnection("events"),
     });
 
-    this.queueEvents.set(processorName, queueEvents);
+    // Use different key for session-specific events
+    const eventsKey = sessionId ? `${processorName}_${sessionId}` : processorName;
+    this.queueEvents.set(eventsKey, queueEvents);
 
     queueEvents.on("completed", ({ jobId, returnvalue }) => {
-      this.emit("queue:completed", { jobId, processorName, returnvalue });
+      this.emit("queue:completed", { jobId, processorName, sessionId, returnvalue });
     });
 
     queueEvents.on("failed", ({ jobId, failedReason }) => {
-      this.emit("queue:failed", { jobId, processorName, reason: failedReason });
+      this.emit("queue:failed", { jobId, processorName, sessionId, reason: failedReason });
     });
   }
 
