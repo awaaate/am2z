@@ -12,7 +12,9 @@
       "Bash(mkdir:*)",
       "Bash(find:*)",
       "Bash(bun test:*)",
-      "Bash(redis-cli:*)"
+      "Bash(redis-cli:*)",
+      "Bash(docker stop:*)",
+      "Bash(docker rm:*)"
     ],
     "deny": []
   }
