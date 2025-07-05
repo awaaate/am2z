@@ -3,9 +3,12 @@ import { Worker, type Job } from "bullmq";
 import {
   type ProcessorDefinition,
   type ProcessorResult,
+  type ProcessorContext,
 } from "../core/processor";
 import { type AppState, type StateManager } from "../core/state";
-import { createLogger, type Logger } from "../core/logging";
+import { type Logger } from "../core/logging";
+import { createComponentLogger } from "../core/component-logger";
+import { SessionManager, NamingUtility } from "../core/session-manager";
 import { type ConnectionManager } from "./connection-manager";
 import { type QueueManager } from "./queue-manager";
 import {
@@ -27,7 +30,8 @@ export interface WorkerConfig {
 
 export class WorkerManager<TState extends AppState = AppState> {
   private workers = new Map<string, Worker>();
-  private sessionWorkers = new Map<string, Set<string>>(); // Track workers per session
+  private readonly sessionManager = new SessionManager<string>(); // Track workers per session
+  private readonly namingUtility: NamingUtility;
   private executor: ProcessorExecutor<TState>;
   private contextFactory = new ContextFactory<TState>();
   private metadataFactory = new MetadataFactory();
@@ -39,9 +43,7 @@ export class WorkerManager<TState extends AppState = AppState> {
     private readonly stateManager: StateManager<TState>,
     private readonly config: WorkerConfig,
     private readonly queuePrefix: string = "am2z",
-    private readonly logger: Logger = createLogger({
-      component: "WorkerManager",
-    }),
+    private readonly logger: Logger = createComponentLogger("WorkerManager"),
     private readonly eventEmitter: (
       eventType: string,
       data: unknown
@@ -57,13 +59,15 @@ export class WorkerManager<TState extends AppState = AppState> {
       executionTime: 0,
       metadata: {} as any,
     }),
-    runtimeConfig?: RuntimeConfig
+    runtimeConfig?: RuntimeConfig,
+    private readonly runtime?: any
   ) {
     this.runtimeConfig = runtimeConfig || DEFAULT_RUNTIME_CONFIG;
     this.executor = new ProcessorExecutor<TState>(
       this.stateManager,
       this.runtimeConfig.defaultTimeout
     );
+    this.namingUtility = new NamingUtility(this.queuePrefix);
   }
 
   /**
@@ -137,10 +141,7 @@ export class WorkerManager<TState extends AppState = AppState> {
 
     // Track session-specific workers
     if (sessionId) {
-      if (!this.sessionWorkers.has(sessionId)) {
-        this.sessionWorkers.set(sessionId, new Set());
-      }
-      this.sessionWorkers.get(sessionId)!.add(workerKey);
+      this.sessionManager.addToSession(sessionId, workerKey);
     }
 
     this.logger.debug(`Created worker for processor: ${processor.name}`, {
@@ -178,7 +179,7 @@ export class WorkerManager<TState extends AppState = AppState> {
       : this.logger;
 
     // ✅ IMPROVED: Create context with inherited call depth and chain info
-    const context = this.contextFactory.createContext(
+    const baseContext = this.contextFactory.createContext(
       processor,
       metadata,
       this.processorCaller,
@@ -188,6 +189,23 @@ export class WorkerManager<TState extends AppState = AppState> {
       this.runtimeConfig.maxCallDepth
       // AbortSignal is now handled internally by ProcessorExecutor
     );
+
+    // Add updateProgress function and runtime access
+    const context: ProcessorContext<TState> = {
+      ...baseContext,
+      updateProgress: async (progress: number) => {
+        await job.updateProgress(progress);
+        this.eventEmitter("job:progress", {
+          jobId: job.id,
+          processorName,
+          progress,
+          executionId,
+        });
+      },
+      runtime: this.runtime ? {
+        emit: (event: string, data: any) => this.runtime.emit(event, data)
+      } : undefined,
+    };
 
     return this.executor.executeProcessor(processor, state, context);
   }
@@ -276,11 +294,8 @@ export class WorkerManager<TState extends AppState = AppState> {
       this.workers.delete(workerKey);
 
       // Clean up session tracking
-      if (sessionId && this.sessionWorkers.has(sessionId)) {
-        this.sessionWorkers.get(sessionId)!.delete(workerKey);
-        if (this.sessionWorkers.get(sessionId)!.size === 0) {
-          this.sessionWorkers.delete(sessionId);
-        }
+      if (sessionId) {
+        this.sessionManager.removeFromSession(sessionId, workerKey);
       }
 
       this.logger.debug(`Removed worker for processor: ${processorName}`, {
@@ -317,15 +332,63 @@ export class WorkerManager<TState extends AppState = AppState> {
   }
 
   /**
+   * Check if a worker exists for the given processor
+   */
+  hasWorker(processorName: string, sessionId?: string): boolean {
+    const workerKey = this.getWorkerKey(processorName, sessionId);
+    return this.workers.has(workerKey);
+  }
+
+  /**
+   * Get total number of workers
+   */
+  getWorkerCount(): number {
+    return this.workers.size;
+  }
+
+  /**
+   * Stop specific worker
+   */
+  async stopWorker(processorName: string, sessionId?: string): Promise<void> {
+    await this.removeWorker(processorName, sessionId);
+  }
+
+  /**
+   * Stop all workers
+   */
+  async stopAll(): Promise<void> {
+    await this.closeAll();
+  }
+
+  /**
+   * Create session-specific worker
+   */
+  async createSessionWorker(processor: ProcessorDefinition<TState>, sessionId: string): Promise<Worker> {
+    await this.createWorker(processor, sessionId);
+    const worker = this.getWorker(processor.name, sessionId);
+    if (!worker) {
+      throw new Error(`Failed to create session worker for ${processor.name}`);
+    }
+    return worker;
+  }
+
+  /**
+   * Stop all workers for a session
+   */
+  async stopSessionWorkers(sessionId: string): Promise<void> {
+    await this.cleanSession(sessionId);
+  }
+
+  /**
    * Clean up all workers for a specific session
    */
   async cleanSession(sessionId: string): Promise<void> {
-    const sessionWorkerKeys = this.sessionWorkers.get(sessionId);
-    if (!sessionWorkerKeys) {
+    const sessionWorkerKeys = this.sessionManager.getSessionItems(sessionId);
+    if (sessionWorkerKeys.length === 0) {
       return;
     }
 
-    const cleanupPromises = Array.from(sessionWorkerKeys).map(
+    const cleanupPromises = sessionWorkerKeys.map(
       async (workerKey) => {
         const worker = this.workers.get(workerKey);
         if (worker) {
@@ -336,10 +399,10 @@ export class WorkerManager<TState extends AppState = AppState> {
     );
 
     await Promise.all(cleanupPromises);
-    this.sessionWorkers.delete(sessionId);
+    this.sessionManager.cleanSession(sessionId);
 
     this.logger.info(`Cleaned up session workers: ${sessionId}`, {
-      cleanedWorkers: sessionWorkerKeys.size,
+      cleanedWorkers: sessionWorkerKeys.length,
     });
   }
 
@@ -347,6 +410,6 @@ export class WorkerManager<TState extends AppState = AppState> {
    * Get all sessions with active workers
    */
   getActiveSessions(): string[] {
-    return Array.from(this.sessionWorkers.keys());
+    return this.sessionManager.getActiveSessions();
   }
 }

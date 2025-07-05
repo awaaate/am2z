@@ -2,7 +2,8 @@ import { EventEmitter } from "events";
 import { type ProcessorResult } from "../core/processor";
 import { type AppState } from "../core/state";
 import { TimeoutError, ManagedTimeout } from "../core/errors";
-import { createLogger, type Logger } from "../core/logging";
+import { type Logger } from "../core/logging";
+import { createComponentLogger } from "../core/component-logger";
 
 export interface PendingExecution<TState extends AppState> {
   resolve: (result: ProcessorResult<TState>) => void;
@@ -19,9 +20,7 @@ export class ResultCollector<
   private cleanupInterval?: NodeJS.Timeout;
 
   constructor(
-    private readonly logger: Logger = createLogger({
-      component: "ResultCollector",
-    }),
+    private readonly logger: Logger = createComponentLogger("ResultCollector"),
     private readonly autoCleanupIntervalMs: number = 2 * 60 * 1000, // 2 minutes
     private readonly maxPendingAgeMs: number = 10 * 60 * 1000 // 10 minutes
   ) {

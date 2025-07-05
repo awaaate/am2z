@@ -1,7 +1,9 @@
 // src/lib/node/connection-manager.ts
 import Redis from "ioredis";
-import { createLogger, type Logger } from "../core/logging";
+import { type Logger } from "../core/logging";
+import { createComponentLogger } from "../core/component-logger";
 import { NetworkError } from "../core/errors";
+import { type ResourceMonitor } from "../core/resource-monitor";
 
 export interface RedisConfig {
   readonly host?: string;
@@ -20,9 +22,8 @@ export class ConnectionManager {
 
   constructor(
     private readonly config: RedisConfig,
-    private readonly logger: Logger = createLogger({
-      component: "ConnectionManager",
-    })
+    private readonly logger: Logger = createComponentLogger("ConnectionManager"),
+    private readonly resourceMonitor?: ResourceMonitor
   ) {}
 
   /**
@@ -66,6 +67,7 @@ export class ConnectionManager {
     redis.on("ready", () => {
       this.logger.info(`Redis connection ready (${purpose})`);
       this.isConnected = true;
+      this.resourceMonitor?.registerConnection();
     });
 
     redis.on("error", (err) => {
@@ -76,6 +78,7 @@ export class ConnectionManager {
     redis.on("close", () => {
       this.logger.warn(`Redis connection closed (${purpose})`);
       this.isConnected = false;
+      this.resourceMonitor?.unregisterConnection();
     });
 
     redis.on("reconnecting", () => {
@@ -105,6 +108,35 @@ export class ConnectionManager {
       this.logger.error("Redis health check failed:", error);
       return false;
     }
+  }
+
+  /**
+   * Check health of all connections with detailed status
+   */
+  async checkHealth(): Promise<{
+    healthy: boolean;
+    connections: Record<string, string>;
+  }> {
+    const connections: Record<string, string> = {};
+    let healthy = true;
+
+    for (const [purpose, connection] of this.connections.entries()) {
+      try {
+        if (connection.status === 'ready') {
+          const result = await connection.ping();
+          connections[purpose] = result === 'PONG' ? 'ready' : 'unhealthy';
+          if (result !== 'PONG') healthy = false;
+        } else {
+          connections[purpose] = 'disconnected';
+          healthy = false;
+        }
+      } catch (error) {
+        connections[purpose] = 'error';
+        healthy = false;
+      }
+    }
+
+    return { healthy, connections };
   }
 
   /**

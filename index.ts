@@ -97,13 +97,12 @@ export const AM2Z = {
   VERSION: "4.0.0",
   FEATURES: [
     "Type-safe processor architecture",
-    "Immutable state management with Immer",
+    "Immutable state management with Imer",
     "Result-based error handling",
     "Composable processor chains",
     "Local and distributed execution",
     "Comprehensive logging and metrics",
     "BullMQ integration with best practices",
-    "React-inspired functional design",
   ] as const,
 } as const;
 

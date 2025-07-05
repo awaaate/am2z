@@ -2,7 +2,9 @@
 import { Queue, type JobsOptions } from "bullmq";
 import { type ProcessorDefinition } from "../core/processor";
 import { type AppState } from "../core/state";
-import { createLogger, type Logger } from "../core/logging";
+import { type Logger } from "../core/logging";
+import { createComponentLogger } from "../core/component-logger";
+import { SessionManager, NamingUtility } from "../core/session-manager";
 import { type ConnectionManager } from "./connection-manager";
 
 export interface QueueConfig {
@@ -15,16 +17,17 @@ export interface QueueConfig {
 
 export class QueueManager<TState extends AppState = AppState> {
   private queues = new Map<string, Queue>();
-  private sessionQueues = new Map<string, Set<string>>(); // Track queues per session
+  private readonly sessionManager = new SessionManager<string>(); // Track queues per session
+  private readonly namingUtility: NamingUtility;
 
   constructor(
     private readonly connectionManager: ConnectionManager,
     private readonly config: QueueConfig,
     private readonly queuePrefix: string = "am2z",
-    private readonly logger: Logger = createLogger({
-      component: "QueueManager",
-    })
-  ) {}
+    private readonly logger: Logger = createComponentLogger("QueueManager")
+  ) {
+    this.namingUtility = new NamingUtility(queuePrefix);
+  }
 
   /**
    * Create queue for a processor
@@ -64,10 +67,7 @@ export class QueueManager<TState extends AppState = AppState> {
 
     // Track session-specific queues
     if (sessionId) {
-      if (!this.sessionQueues.has(sessionId)) {
-        this.sessionQueues.set(sessionId, new Set());
-      }
-      this.sessionQueues.get(sessionId)!.add(queueKey);
+      this.sessionManager.addToSession(sessionId, queueKey);
     }
 
     this.logger.debug(`Created queue for processor: ${processor.name}`, {
@@ -104,11 +104,8 @@ export class QueueManager<TState extends AppState = AppState> {
       this.queues.delete(queueKey);
       
       // Clean up session tracking
-      if (sessionId && this.sessionQueues.has(sessionId)) {
-        this.sessionQueues.get(sessionId)!.delete(queueKey);
-        if (this.sessionQueues.get(sessionId)!.size === 0) {
-          this.sessionQueues.delete(sessionId);
-        }
+      if (sessionId) {
+        this.sessionManager.removeFromSession(sessionId, queueKey);
       }
       
       this.logger.debug(`Removed queue for processor: ${processorName}`, {
@@ -147,8 +144,8 @@ export class QueueManager<TState extends AppState = AppState> {
       queuesToCheck = queue ? [queue] : [];
     } else if (sessionId) {
       // Get all queues for this session
-      const sessionQueueKeys = this.sessionQueues.get(sessionId) || new Set();
-      queuesToCheck = Array.from(sessionQueueKeys)
+      const sessionQueueKeys = this.sessionManager.getSessionItems(sessionId);
+      queuesToCheck = sessionQueueKeys
         .map(key => this.queues.get(key))
         .filter((q): q is Queue => q !== undefined);
     } else {
@@ -177,8 +174,7 @@ export class QueueManager<TState extends AppState = AppState> {
   }
 
   private getQueueName(processorName: string, sessionId?: string): string {
-    const baseName = `${this.queuePrefix}_${processorName}`;
-    return sessionId ? `${baseName}_${sessionId}` : baseName;
+    return this.namingUtility.getResourceName(processorName, sessionId);
   }
 
   private getQueueKey(processorName: string, sessionId?: string): string {
@@ -196,12 +192,12 @@ export class QueueManager<TState extends AppState = AppState> {
    * Clean up all queues for a specific session
    */
   async cleanSession(sessionId: string): Promise<void> {
-    const sessionQueueKeys = this.sessionQueues.get(sessionId);
-    if (!sessionQueueKeys) {
+    const sessionQueueKeys = this.sessionManager.getSessionItems(sessionId);
+    if (sessionQueueKeys.length === 0) {
       return;
     }
 
-    const cleanupPromises = Array.from(sessionQueueKeys).map(async (queueKey) => {
+    const cleanupPromises = sessionQueueKeys.map(async (queueKey) => {
       const queue = this.queues.get(queueKey);
       if (queue) {
         // Clean all jobs in the queue
@@ -214,10 +210,10 @@ export class QueueManager<TState extends AppState = AppState> {
     });
 
     await Promise.all(cleanupPromises);
-    this.sessionQueues.delete(sessionId);
+    this.sessionManager.cleanSession(sessionId);
     
     this.logger.info(`Cleaned up session queues: ${sessionId}`, {
-      cleanedQueues: sessionQueueKeys.size,
+      cleanedQueues: sessionQueueKeys.length,
     });
   }
 
@@ -225,6 +221,6 @@ export class QueueManager<TState extends AppState = AppState> {
    * Get all sessions with active queues
    */
   getActiveSessions(): string[] {
-    return Array.from(this.sessionQueues.keys());
+    return this.sessionManager.getActiveSessions();
   }
 }

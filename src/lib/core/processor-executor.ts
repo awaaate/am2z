@@ -186,6 +186,11 @@ export class ContextFactory<TState extends AppState = AppState> {
         callStack: this.buildCallStack(metadata, callDepth),
         parentExecutionId: metadata.executionId,
       },
+      processor: processor.name,
+      sessionId: metadata.sessionId,
+      executionId: metadata.executionId,
+      updateProgress: undefined, // Will be set by WorkerManager when needed
+      runtime: undefined, // Will be set by QueueRuntime when needed
     };
   }
 

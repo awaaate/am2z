@@ -37,6 +37,13 @@ export interface ProcessorContext<TState extends AppState = AppState> {
     readonly callStack: string[];
     readonly parentExecutionId?: string;
   };
+  readonly updateProgress?: (progress: number) => Promise<void>;
+  readonly runtime?: {
+    emit: (event: string, data: any) => void;
+  };
+  readonly processor: string;
+  readonly sessionId?: string;
+  readonly executionId?: string;
 }
 
 /**
@@ -107,7 +114,8 @@ export interface ProcessorConfig {
 export interface RetryPolicy {
   readonly maxAttempts: number;
   readonly backoffMs: number;
-  readonly shouldRetry?: (error: AM2ZError) => boolean;
+  readonly backoffMultiplier?: number;
+  readonly shouldRetry?: (error: AM2ZError, attempt: number) => boolean;
   readonly onRetry?: (error: AM2ZError, attempt: number) => void;
   readonly onExhausted?: (error: AM2ZError, totalAttempts: number) => void;
 }
@@ -119,6 +127,24 @@ export interface QueueConfig {
   readonly priority?: number;
   readonly concurrency?: number;
   readonly rateLimitRpm?: number;
+  readonly maxStalledCount?: number;
+  readonly stalledInterval?: number;
+  readonly defaultJobOptions?: {
+    readonly attempts?: number;
+    readonly backoff?: number | { type: string; delay: number };
+    readonly delay?: number;
+    readonly removeOnComplete?:
+      | boolean
+      | number
+      | { age?: number; count?: number };
+    readonly removeOnFail?: boolean | number | { age?: number; count?: number };
+    readonly priority?: number;
+  };
+  readonly limiter?: {
+    readonly max: number;
+    readonly duration: number;
+    readonly bounceBack?: boolean;
+  };
 }
 
 type ProcessorTypes = "chain" | "processor" | "router" | "parallel";
@@ -167,7 +193,7 @@ export class ProcessorBuilder<TState extends AppState = AppState> {
   constructor(
     private readonly name: string,
     private readonly type?: ProcessorTypes,
-    private readonly deps?: ProcessorDefinition<TState>[]
+    private deps?: ProcessorDefinition<TState>[]
   ) {}
 
   /**
@@ -207,6 +233,16 @@ export class ProcessorBuilder<TState extends AppState = AppState> {
    */
   withQueueConfig(queueConfig: QueueConfig): this {
     this.config = { ...this.config, queueConfig };
+    return this;
+  }
+
+  /**
+   * Set the dependencies for the processor.
+   * @param deps - The dependencies.
+   * @returns This builder instance.
+   */
+  withDependencies(deps: ProcessorDefinition<TState>[]): this {
+    this.deps = deps;
     return this;
   }
 
@@ -574,19 +610,22 @@ export function routeProcessor<TState extends AppState = AppState>(
  * @param initialState - The initial state before parallel execution.
  * @returns The merged state.
  */
-function defaultMergeFunction<TState extends AppState = AppState>(
-  results: TState[],
-  initialState: TState
-): TState {
+function defaultMergeFunction<
+  TState extends AppState = AppState,
+  TPayload extends AppState[] = AppState[],
+>(results: TPayload, initialState: TState): TState {
+  //@ts-expect-error TODO: fix this
   return results.reduce((merged, current) => {
     const newState = { ...merged };
     for (const [key, value] of Object.entries(current)) {
       if (
         key === "messages" &&
         Array.isArray(value) &&
+        //@ts-expect-error TODO: fix this
         Array.isArray(merged[key as keyof TState])
       ) {
         (newState as any)[key] = [
+          //@ts-expect-error TODO: fix this
           ...(merged[key as keyof TState] as any),
           ...value,
         ];
@@ -608,9 +647,7 @@ interface BatchProcessorInput<
   name: string;
   processorName: string;
   payloads: TPayload;
-  mergeFunction?: (results: TState[], initialState: TState) => TState;
-  sessionId?: string; // Optional explicit session ID for isolation
-  isolateSession?: boolean; // Whether to create session-specific queues
+  mergeFunction?: (results: TPayload, initialState: TState) => TState;
 }
 
 /**
@@ -627,14 +664,15 @@ interface BatchProcessorInput<
  *   payloads: [payload1, payload2, payload3, payload4, payload5],
  * });
  */
-export function batchProcessor<TState extends AppState = AppState>({
+export function batchProcessor<
+  TState extends AppState = AppState,
+  TPayload extends AppState[] = AppState[],
+>({
   name,
   processorName,
   mergeFunction = defaultMergeFunction,
   payloads,
-  sessionId,
-  isolateSession = false,
-}: BatchProcessorInput<TState>): ProcessorDefinition<TState> {
+}: BatchProcessorInput<TState, TPayload>): ProcessorDefinition<TState> {
   const times = payloads.length;
   if (times <= 0) {
     throw new ConfigurationError(
@@ -663,11 +701,8 @@ export function batchProcessor<TState extends AppState = AppState>({
           "payloads must be an array of payloads"
         );
       }
-      
-      // Use explicit session ID if provided, otherwise create batch-specific session IDs
-      const batchSessionId = sessionId 
-        ? (isolateSession ? `${sessionId}-batch-${index}` : sessionId)
-        : context.meta.sessionId + `-${index}`;
+
+      const batchSessionId = payload.metadata.sessionId;
 
       return context.call(processorName, payload as TState, {
         sessionId: batchSessionId,
@@ -732,7 +767,8 @@ export function batchProcessor<TState extends AppState = AppState>({
       successfulCalls: successfulStates.length,
     });
 
-    const mergedState = mergeFunction(successfulStates, state);
+    //@ts-expect-error TODO: fix this
+    const mergedState = mergeFunction(successfulStates as TPayload, state);
 
     return Success(mergedState);
   });

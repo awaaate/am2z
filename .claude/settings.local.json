@@ -6,7 +6,13 @@
       "Bash(rm:*)",
       "Bash(grep:*)",
       "Bash(bun run:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git push:*)",
+      "Bash(rg:*)",
+      "Bash(mkdir:*)",
+      "Bash(find:*)",
+      "Bash(bun test:*)",
+      "Bash(redis-cli:*)"
     ],
     "deny": []
   }

@@ -56,6 +56,13 @@ export interface Logger {
  */
 export type LogFormatter = (entry: LogEntry) => void;
 
+export interface LoggerOptions {
+  baseContext?: Record<string, unknown>;
+  minLevel?: LogLevel;
+  formatter?: LogFormatter;
+  source?: string;
+}
+
 /**
  * Create a logger instance with optional base context.
  * @param baseContext - Default context for all log entries.
@@ -67,12 +74,12 @@ export type LogFormatter = (entry: LogEntry) => void;
  * const logger = createLogger({ app: 'my-app' }, 'debug');
  * logger.info('Started');
  */
-export function createLogger(
-  baseContext: Record<string, unknown> = {},
-  minLevel: LogLevel = "info",
-  formatter?: LogFormatter,
-  source?: string
-): Logger {
+export function createLogger({
+  baseContext = {},
+  minLevel = "info",
+  formatter,
+  source,
+}: LoggerOptions = {}): Logger {
   const levels: Record<LogLevel, number> = {
     debug: 0,
     info: 1,
@@ -138,15 +145,15 @@ export function createLogger(
     },
 
     withContext: (additionalContext) =>
-      createLogger(
-        { ...baseContext, ...additionalContext },
+      createLogger({
+        baseContext: { ...baseContext, ...additionalContext },
         minLevel,
         formatter,
-        source
-      ),
+        source,
+      }),
 
     withSource: (newSource) =>
-      createLogger(baseContext, minLevel, formatter, newSource),
+      createLogger({ baseContext, minLevel, formatter, source: newSource }),
   };
 }
 
@@ -203,5 +210,9 @@ export function createJsonFormatter(): LogFormatter {
  * logger.info('This will not be shown');
  */
 export function createSilentLogger(): Logger {
-  return createLogger({}, "error", () => {}); // No-op formatter
+  return createLogger({
+    baseContext: {},
+    minLevel: "error",
+    formatter: () => {},
+  }); // No-op formatter
 }

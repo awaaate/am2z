@@ -1,6 +1,8 @@
 // src/lib/core/runtime.ts - Updated
 import { type AppState } from "./state";
-import { createLogger, type Logger } from "./logging";
+import { type Logger } from "./logging";
+import { createComponentLogger } from "./component-logger";
+import { type ResourceLimits } from "./resource-monitor";
 import { ConfigurationError, ProcessorNotFoundError } from "./errors";
 import { type ProcessorDefinition, type ProcessorResult } from "./processor";
 import {
@@ -69,9 +71,7 @@ export class LocalRuntime<TState extends AppState = AppState>
 
   constructor(
     private readonly config: RuntimeConfig = DEFAULT_RUNTIME_CONFIG,
-    private readonly logger: Logger = createLogger({
-      component: "LocalRuntime",
-    })
+    private readonly logger: Logger = createComponentLogger("LocalRuntime")
   ) {
     this.executor = new ProcessorExecutor<TState>(
       undefined,

@@ -1,7 +1,8 @@
 // src/lib/node/distributed-runtime.ts - Completely Refactored
 import { Queue, QueueEvents } from "bullmq";
 import { ProcessorNotFoundError } from "../core/errors";
-import { createLogger, type Logger } from "../core/logging";
+import { type Logger } from "../core/logging";
+import { createComponentLogger } from "../core/component-logger";
 import {
   type ProcessorDefinition,
   type ProcessorResult,
@@ -83,14 +84,12 @@ export class QueueRuntime<TState extends AppState = AppState>
     startedAt: Date.now(),
   };
 
-  private isStarted = false;
+  private _isStarted = false;
   private metricsInterval?: NodeJS.Timeout;
 
   constructor(
     private readonly config: QueueRuntimeConfig,
-    private readonly logger: Logger = createLogger({
-      component: "QueueRuntime",
-    })
+    private readonly logger: Logger = createComponentLogger("QueueRuntime")
   ) {
     // Merge runtime config with defaults
     this.runtimeConfig = validateRuntimeConfig({
@@ -118,7 +117,8 @@ export class QueueRuntime<TState extends AppState = AppState>
       (eventType, data) => this.emit(eventType, data),
       (processorName, state, callContext) =>
         this.executeViaCall(processorName, state, callContext),
-      this.runtimeConfig
+      this.runtimeConfig,
+      this
     );
     this.resultCollector = new ResultCollector(
       logger,
@@ -238,7 +238,7 @@ export class QueueRuntime<TState extends AppState = AppState>
   }
 
   async start(): Promise<void> {
-    if (this.isStarted) {
+    if (this._isStarted) {
       this.logger.warn("Runtime already started");
       return;
     }
@@ -253,11 +253,49 @@ export class QueueRuntime<TState extends AppState = AppState>
       this.startMetricsCollection();
     }
 
-    this.isStarted = true;
+    this._isStarted = true;
 
     this.logger.info("Distributed runtime started", {
       registeredProcessors: Array.from(this.processors.keys()),
     });
+  }
+
+  /**
+   * Check if the runtime is started
+   */
+  isStarted(): boolean {
+    return this._isStarted;
+  }
+
+  /**
+   * Get list of registered processor names
+   */
+  listProcessors(): string[] {
+    return Array.from(this.processors.keys());
+  }
+
+  /**
+   * Get queue statistics for all processors
+   */
+  async getQueueStats(): Promise<Record<string, any>> {
+    const stats: Record<string, any> = {};
+
+    for (const processorName of this.processors.keys()) {
+      const queue = this.queueManager.getQueue(processorName);
+      if (queue) {
+        const counts = await queue.getJobCounts();
+        stats[processorName] = {
+          waiting: counts.waiting || 0,
+          active: counts.active || 0,
+          completed: counts.completed || 0,
+          failed: counts.failed || 0,
+          delayed: counts.delayed || 0,
+          paused: counts.paused || 0,
+        };
+      }
+    }
+
+    return stats;
   }
 
   /**
@@ -268,7 +306,7 @@ export class QueueRuntime<TState extends AppState = AppState>
     state: TState,
     sessionId = "distributed-session"
   ): Promise<ProcessorResult<TState>> {
-    if (!this.isStarted) {
+    if (!this._isStarted) {
       throw new Error("Runtime not started. Call start() first.");
     }
 
@@ -328,7 +366,11 @@ export class QueueRuntime<TState extends AppState = AppState>
       });
 
       // Wait for result via events (timeout manejado por ProcessorExecutor)
-      const result = await this.resultCollector.waitForResult(executionId, undefined, sessionId);
+      const result = await this.resultCollector.waitForResult(
+        executionId,
+        undefined,
+        sessionId
+      );
 
       // Update stats for successful/failed jobs (but don't modify runningJobs here)
       if (result.success) {
@@ -349,7 +391,7 @@ export class QueueRuntime<TState extends AppState = AppState>
     states: TState[],
     sessionId = "distributed-session"
   ): Promise<ProcessorResult<TState>[]> {
-    if (!this.isStarted) {
+    if (!this._isStarted) {
       throw new Error("Runtime not started. Call start() first.");
     }
 
@@ -420,7 +462,11 @@ export class QueueRuntime<TState extends AppState = AppState>
     // Wait for all results using Promise.allSettled for better error handling
     const resultPromises = executionData.map(async ({ executionId, state }) => {
       try {
-        const result = await this.resultCollector.waitForResult(executionId, undefined, sessionId);
+        const result = await this.resultCollector.waitForResult(
+          executionId,
+          undefined,
+          sessionId
+        );
 
         // Update stats
         if (result.success) {
@@ -515,7 +561,7 @@ export class QueueRuntime<TState extends AppState = AppState>
     state: TState,
     callContext?: Partial<ProcessorCallContext>
   ): Promise<ProcessorResult<TState>> {
-    if (!this.isStarted) {
+    if (!this._isStarted) {
       throw new Error("Runtime not started. Call start() first.");
     }
 
@@ -598,7 +644,11 @@ export class QueueRuntime<TState extends AppState = AppState>
         chainName: callContext?.chainName,
       });
 
-      const result = await this.resultCollector.waitForResult(executionId, undefined, sessionId);
+      const result = await this.resultCollector.waitForResult(
+        executionId,
+        undefined,
+        sessionId
+      );
 
       if (result.success) {
         this.stats.completedJobs++;
@@ -617,39 +667,50 @@ export class QueueRuntime<TState extends AppState = AppState>
   }
 
   async stop(): Promise<void> {
-    if (!this.isStarted) {
+    if (!this._isStarted) {
       this.logger.warn("Runtime not started");
       return;
     }
 
     this.logger.info("Stopping distributed runtime...");
 
-    // Stop metrics collection
-    if (this.metricsInterval) {
-      clearInterval(this.metricsInterval);
+    try {
+      // Get stats before we start closing things
+      const finalStats = await this.getStats();
+
+      // Stop metrics collection
+      if (this.metricsInterval) {
+        clearInterval(this.metricsInterval);
+        this.metricsInterval = undefined;
+      }
+
+      // Clean up stale executions before shutdown
+      this.resultCollector.cleanupStale(
+        this.runtimeConfig.staleExecutionTimeout
+      );
+
+      // Close all components and clean up resources
+      await Promise.allSettled([
+        this.workerManager.closeAll(),
+        this.queueManager.closeAll(),
+        this.closeQueueEvents(),
+        this.resultCollector.cleanup(),
+      ]);
+
+      // Clean up event handlers to prevent memory leaks
+      this.eventHandlers.clear();
+
+      // Set stopped state before disconnecting
+      this._isStarted = false;
+
+      this.logger.info("Distributed runtime stopped", {
+        stats: finalStats,
+      });
+    } catch (error) {
+      this.logger.error("Error during runtime stop", error);
+      this._isStarted = false;
+      throw error;
     }
-    // Clean up stale executions before shutdown
-    this.resultCollector.cleanupStale(this.runtimeConfig.staleExecutionTimeout);
-
-    // Close all components and clean up resources
-    await Promise.all([
-      this.workerManager.closeAll(),
-      this.queueManager.closeAll(),
-      this.closeQueueEvents(),
-      this.resultCollector.cleanup(),
-    ]);
-
-    // Clean up event handlers to prevent memory leaks
-    this.eventHandlers.clear();
-
-    // Disconnect Redis
-    //await this.connectionManager.disconnect();
-
-    this.isStarted = false;
-
-    this.logger.info("Distributed runtime stopped", {
-      stats: await this.getStats(),
-    });
   }
 
   async disconnect(): Promise<void> {
@@ -690,7 +751,7 @@ export class QueueRuntime<TState extends AppState = AppState>
   }
 
   // === Session Management ===
-  
+
   /**
    * Execute processor with session isolation
    */
@@ -703,19 +764,22 @@ export class QueueRuntime<TState extends AppState = AppState>
     const processor = this.processors.get(processorName);
     if (!processor) {
       const availableProcessors = Array.from(this.processors.keys());
-      const error = new ProcessorNotFoundError(processorName, availableProcessors);
-      return { 
-        state, 
-        executionTime: 0, 
-        success: false, 
-        error, 
+      const error = new ProcessorNotFoundError(
+        processorName,
+        availableProcessors
+      );
+      return {
+        state,
+        executionTime: 0,
+        success: false,
+        error,
         metadata: this.metadataFactory.createMetadata(
-          processorName, 
-          sessionId, 
-          'failed', 
-          Date.now(), 
+          processorName,
+          sessionId,
+          "failed",
+          Date.now(),
           1
-        )
+        ),
       };
     }
 
@@ -725,7 +789,9 @@ export class QueueRuntime<TState extends AppState = AppState>
     // Execute with session-specific queue
     const sessionQueue = this.queueManager.getQueue(processorName, sessionId);
     if (!sessionQueue) {
-      throw new Error(`Session queue not found for processor: ${processorName}, session: ${sessionId}`);
+      throw new Error(
+        `Session queue not found for processor: ${processorName}, session: ${sessionId}`
+      );
     }
 
     const executionId = this.metadataFactory.generateExecutionId(processorName);
@@ -755,7 +821,11 @@ export class QueueRuntime<TState extends AppState = AppState>
       await sessionQueue.add(processorName, jobData, jobOptions);
 
       // Wait for result
-      const result = await this.resultCollector.waitForResult(executionId, undefined, sessionId);
+      const result = await this.resultCollector.waitForResult(
+        executionId,
+        undefined,
+        sessionId
+      );
 
       if (result.success) {
         this.stats.completedJobs++;
@@ -787,7 +857,9 @@ export class QueueRuntime<TState extends AppState = AppState>
 
       // Note: StateManager doesn't provide delete method
       // Session state will be cleaned up by Redis TTL or manual cleanup
-      this.logger.debug(`Session state cleanup skipped for: ${sessionId} (no delete method available)`);
+      this.logger.debug(
+        `Session state cleanup skipped for: ${sessionId} (no delete method available)`
+      );
 
       this.logger.info(`Session stopped: ${sessionId}`);
     } catch (error) {
@@ -809,7 +881,7 @@ export class QueueRuntime<TState extends AppState = AppState>
   getActiveSessions(): string[] {
     const queueSessions = this.queueManager.getActiveSessions();
     const workerSessions = this.workerManager.getActiveSessions();
-    
+
     // Combine and deduplicate
     const allSessions = new Set([...queueSessions, ...workerSessions]);
     return Array.from(allSessions);
@@ -820,9 +892,9 @@ export class QueueRuntime<TState extends AppState = AppState>
    */
   async cleanAllSessions(): Promise<void> {
     const activeSessions = this.getActiveSessions();
-    
-    const cleanupPromises = activeSessions.map(sessionId => 
-      this.stopSession(sessionId).catch(error => 
+
+    const cleanupPromises = activeSessions.map((sessionId) =>
+      this.stopSession(sessionId).catch((error) =>
         this.logger.warn(`Failed to clean session ${sessionId}`, { error })
       )
     );
@@ -845,7 +917,10 @@ export class QueueRuntime<TState extends AppState = AppState>
     }
 
     // Check if session-specific worker exists
-    const existingWorker = this.workerManager.getWorker(processor.name, sessionId);
+    const existingWorker = this.workerManager.getWorker(
+      processor.name,
+      sessionId
+    );
     if (!existingWorker) {
       await this.workerManager.createWorker(processor, sessionId);
     }
@@ -878,7 +953,7 @@ export class QueueRuntime<TState extends AppState = AppState>
     }
   }
 
-  private emit(eventType: string, data: unknown): void {
+  emit(eventType: string, data: unknown): void {
     const handlers = this.eventHandlers.get(eventType);
     if (handlers) {
       handlers.forEach((handler) => {
@@ -934,7 +1009,7 @@ export class QueueRuntime<TState extends AppState = AppState>
   }
 
   private setupQueueEvents(processorName: string, sessionId?: string): void {
-    const queueName = sessionId 
+    const queueName = sessionId
       ? `${this.config.queuePrefix || "am2z"}_${processorName}_${sessionId}`
       : `${this.config.queuePrefix || "am2z"}_${processorName}`;
 
@@ -943,15 +1018,27 @@ export class QueueRuntime<TState extends AppState = AppState>
     });
 
     // Use different key for session-specific events
-    const eventsKey = sessionId ? `${processorName}_${sessionId}` : processorName;
+    const eventsKey = sessionId
+      ? `${processorName}_${sessionId}`
+      : processorName;
     this.queueEvents.set(eventsKey, queueEvents);
 
     queueEvents.on("completed", ({ jobId, returnvalue }) => {
-      this.emit("queue:completed", { jobId, processorName, sessionId, returnvalue });
+      this.emit("queue:completed", {
+        jobId,
+        processorName,
+        sessionId,
+        returnvalue,
+      });
     });
 
     queueEvents.on("failed", ({ jobId, failedReason }) => {
-      this.emit("queue:failed", { jobId, processorName, sessionId, reason: failedReason });
+      this.emit("queue:failed", {
+        jobId,
+        processorName,
+        sessionId,
+        reason: failedReason,
+      });
     });
   }
 
