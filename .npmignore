@@ -1,0 +1,40 @@
+# Source files - only include built distribution
+src/
+tsconfig.json
+.claude/
+*.log
+
+# Development files
+.DS_Store
+.env*
+.vscode/
+.idea/
+
+# Testing
+src/tests/
+*.test.ts
+*.test.js
+coverage/
+
+# Documentation (keep README.md)
+docs/
+CLAUDE.md
+TESTING_README.md
+ERRORS_FIXED.md
+RUNTIME_ERRORS_FIXED.md
+
+# Examples (keep in npm package)
+# src/examples/
+
+# Build artifacts to exclude
+node_modules/
+bun.lock
+
+# Generated files
+generated/
+
+# Keep these for NPM
+# README.md
+# package.json
+# dist/
+# LICENSE

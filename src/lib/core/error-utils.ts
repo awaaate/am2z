@@ -29,8 +29,8 @@ export function extractErrorsFromResults<T>(
  */
 export function extractFirstError<TState extends AppState>(
   results: ProcessorResult<TState>[],
-  compositionName: string,
-  executionId: string
+  _compositionName: string,
+  _executionId: string
 ): AM2ZError | null {
   const failedResult = results.find((r) => !r.success);
   if (failedResult?.error) {

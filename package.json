@@ -32,7 +32,9 @@
     "test": "bun test",
     "lint": "eslint src --ext .ts",
     "format": "prettier --write \"src/**/*.ts\" \"*.md\"",
-    "docs:serve": "cd docs && python -m http.server 8080"
+    "docs:serve": "cd docs && python -m http.server 8080",
+    "prepublishOnly": "bun run build",
+    "postpublish": "echo 'Published AM2Z v'$npm_package_version' to NPM! 🚀'"
   },
   "keywords": [
     "typescript",
@@ -81,10 +83,16 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/am2z/am2z.git"
+    "url": "https://github.com/awaaate/am2z.git"
   },
   "bugs": {
-    "url": "https://github.com/am2z/am2z/issues"
+    "url": "https://github.com/awaaate/am2z/issues"
   },
-  "homepage": "https://github.com/am2z/am2z#readme"
+  "homepage": "https://github.com/awaaate/am2z#readme",
+  "files": [
+    "dist/**/*",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ]
 }
