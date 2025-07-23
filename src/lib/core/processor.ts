@@ -648,6 +648,7 @@ interface BatchProcessorInput<
   processorName: string;
   payloads: TPayload;
   mergeFunction?: (results: TPayload, initialState: TState) => TState;
+  timeout?: number;
 }
 
 /**
@@ -672,6 +673,7 @@ export function batchProcessor<
   processorName,
   mergeFunction = defaultMergeFunction,
   payloads,
+  timeout,
 }: BatchProcessorInput<TState, TPayload>): ProcessorDefinition<TState> {
   const times = payloads.length;
   if (times <= 0) {
@@ -683,7 +685,9 @@ export function batchProcessor<
 
   const builder = new ProcessorBuilder<TState>(name, "processor");
   builder.withDescription(`Batch execution: ${processorName} x${times}`);
-
+  if (timeout) {
+    builder.withTimeout(timeout);
+  }
   return builder.process(async (state, context) => {
     context.log.debug(
       `Starting batch execution: ${times} calls to ${processorName}`,

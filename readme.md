@@ -1330,6 +1330,804 @@ class MultiTenantProcessor {
 
 ---
 
+## AI Integration
+
+AM2Z provides powerful patterns for integrating AI services into your workflows. The framework's architecture is particularly well-suited for AI applications due to its support for long-running operations, parallel processing, and robust error handling.
+
+### 🤖 **Why AM2Z for AI Applications?**
+
+- **Long-Running Operations**: AI calls can take time - AM2Z handles timeouts and retries gracefully
+- **Parallel AI Processing**: Run multiple AI operations concurrently with automatic result merging
+- **Session Isolation**: Each AI workflow runs in isolation, perfect for multi-user applications
+- **Cost Control**: Built-in rate limiting and resource management for expensive AI operations
+- **Observability**: Monitor AI pipelines with Bull Board and comprehensive logging
+- **Type Safety**: Full TypeScript support for AI inputs and outputs
+
+### 📋 **AI Integration Patterns**
+
+#### **1. Basic AI Processor**
+
+```typescript
+import { createProcessor, Success, Failure, ProcessorExecutionError } from "am2z";
+import { openai } from "@ai-sdk/openai";
+import { generateText, generateObject } from "ai";
+import { z } from "zod";
+
+interface AIState extends AppState {
+  prompt: string;
+  generatedContent?: string;
+  metadata?: {
+    model: string;
+    tokens: number;
+    duration: number;
+  };
+}
+
+const aiTextGenerator = createProcessor<AIState>("ai-text-generator")
+  .withDescription("Generate text using OpenAI")
+  .withTimeout(30000) // 30 seconds for AI operations
+  .withRetryPolicy({
+    maxAttempts: 2,
+    backoffMs: 5000,
+    shouldRetry: (error) => {
+      // Retry on rate limits and network errors
+      return error.code === "rate_limit" || error.category === "network";
+    }
+  })
+  .process(async (state, ctx) => {
+    const startTime = Date.now();
+    
+    ctx.log.info("Starting AI text generation", {
+      promptLength: state.prompt.length,
+      model: "gpt-4o"
+    });
+    
+    try {
+      const { text, usage } = await generateText({
+        model: openai("gpt-4o"),
+        prompt: state.prompt,
+        maxTokens: 2000,
+        temperature: 0.7,
+        abortSignal: ctx.signal // Cooperative cancellation
+      });
+      
+      const duration = Date.now() - startTime;
+      
+      ctx.log.info("AI generation completed", {
+        outputLength: text.length,
+        tokensUsed: usage.totalTokens,
+        duration
+      });
+      
+      return Success({
+        ...state,
+        generatedContent: text,
+        metadata: {
+          model: "gpt-4o",
+          tokens: usage.totalTokens,
+          duration
+        }
+      });
+    } catch (error) {
+      ctx.log.error("AI generation failed", error);
+      return Failure(
+        new ProcessorExecutionError(
+          "ai-text-generator",
+          ctx.meta.executionId,
+          error instanceof Error ? error : new Error("AI generation failed")
+        )
+      );
+    }
+  });
+```
+
+#### **2. Structured AI Output with Zod**
+
+```typescript
+// Define structured output schema
+const AnalysisResultSchema = z.object({
+  summary: z.string(),
+  sentiment: z.enum(["positive", "negative", "neutral"]),
+  keyPoints: z.array(z.string()),
+  score: z.number().min(0).max(100),
+  recommendations: z.array(z.object({
+    action: z.string(),
+    priority: z.enum(["high", "medium", "low"]),
+    reasoning: z.string()
+  }))
+});
+
+type AnalysisResult = z.infer<typeof AnalysisResultSchema>;
+
+interface AnalysisState extends AppState {
+  textToAnalyze: string;
+  analysis?: AnalysisResult;
+}
+
+const aiAnalyzer = createProcessor<AnalysisState>("ai-analyzer")
+  .withDescription("Analyze text and extract structured insights")
+  .process(async (state, ctx) => {
+    ctx.log.info("Analyzing text with AI");
+    
+    try {
+      const { object } = await generateObject({
+        model: openai("gpt-4o"),
+        schema: AnalysisResultSchema,
+        system: "You are an expert analyst. Analyze the provided text and extract structured insights.",
+        prompt: state.textToAnalyze,
+        abortSignal: ctx.signal
+      });
+      
+      return Success({
+        ...state,
+        analysis: object
+      });
+    } catch (error) {
+      return Failure(error);
+    }
+  });
+```
+
+#### **3. Parallel AI Processing**
+
+```typescript
+interface ContentGenerationState extends AppState {
+  topic: string;
+  targetAudience: string;
+  // Results from parallel generation
+  blogPost?: string;
+  socialMediaPosts?: string[];
+  emailNewsletter?: string;
+  videoScript?: string;
+}
+
+// Individual AI processors
+const blogPostGenerator = createProcessor<ContentGenerationState>("generate-blog")
+  .process(async (state, ctx) => {
+    const { text } = await generateText({
+      model: openai("gpt-4o"),
+      system: "You are an expert blog writer.",
+      prompt: `Write a comprehensive blog post about ${state.topic} for ${state.targetAudience}`,
+      maxTokens: 3000
+    });
+    
+    return Success({ ...state, blogPost: text });
+  });
+
+const socialMediaGenerator = createProcessor<ContentGenerationState>("generate-social")
+  .process(async (state, ctx) => {
+    const { object } = await generateObject({
+      model: openai("gpt-4o-mini"),
+      schema: z.object({
+        posts: z.array(z.string()).length(5)
+      }),
+      prompt: `Create 5 social media posts about ${state.topic} for ${state.targetAudience}`
+    });
+    
+    return Success({ ...state, socialMediaPosts: object.posts });
+  });
+
+const emailGenerator = createProcessor<ContentGenerationState>("generate-email")
+  .process(async (state, ctx) => {
+    const { text } = await generateText({
+      model: openai("gpt-4o-mini"),
+      prompt: `Write an email newsletter about ${state.topic} for ${state.targetAudience}`
+    });
+    
+    return Success({ ...state, emailNewsletter: text });
+  });
+
+// Parallel execution of all content generation
+const contentGenerationPipeline = parallelProcessors<ContentGenerationState>({
+  name: "parallel-content-generation",
+  processors: [
+    blogPostGenerator,
+    socialMediaGenerator,
+    emailGenerator
+  ],
+  timeout: 60000, // 1 minute for all parallel operations
+  mergeFunction: (results) => {
+    // Merge all parallel results into final state
+    const finalState = results[0].state;
+    
+    results.forEach(result => {
+      if (result.state.blogPost) finalState.blogPost = result.state.blogPost;
+      if (result.state.socialMediaPosts) finalState.socialMediaPosts = result.state.socialMediaPosts;
+      if (result.state.emailNewsletter) finalState.emailNewsletter = result.state.emailNewsletter;
+    });
+    
+    return finalState;
+  }
+});
+```
+
+#### **4. AI Workflow with Quality Assurance**
+
+```typescript
+interface AIWorkflowState extends AppState {
+  requirements: string;
+  generatedCode?: string;
+  qualityScore?: number;
+  issues?: string[];
+  approved?: boolean;
+}
+
+// Generate code based on requirements
+const codeGenerator = createProcessor<AIWorkflowState>("generate-code")
+  .process(async (state, ctx) => {
+    const { text } = await generateText({
+      model: openai("gpt-4o"),
+      system: "You are an expert programmer. Generate clean, well-documented code.",
+      prompt: `Generate code for: ${state.requirements}`,
+      maxTokens: 4000
+    });
+    
+    return Success({ ...state, generatedCode: text });
+  });
+
+// AI-powered code review
+const codeReviewer = createProcessor<AIWorkflowState>("review-code")
+  .process(async (state, ctx) => {
+    if (!state.generatedCode) {
+      return Failure(new ValidationError("generatedCode", undefined, "No code to review"));
+    }
+    
+    const { object } = await generateObject({
+      model: openai("gpt-4o"),
+      schema: z.object({
+        qualityScore: z.number().min(0).max(100),
+        issues: z.array(z.string()),
+        suggestions: z.array(z.string())
+      }),
+      system: "You are a senior code reviewer. Analyze the code for quality, security, and best practices.",
+      prompt: state.generatedCode
+    });
+    
+    return Success({
+      ...state,
+      qualityScore: object.qualityScore,
+      issues: object.issues,
+      approved: object.qualityScore >= 80
+    });
+  });
+
+// Conditional improvement based on review
+const codeImprover = createProcessor<AIWorkflowState>("improve-code")
+  .process(async (state, ctx) => {
+    if (state.approved) {
+      ctx.log.info("Code approved, skipping improvement");
+      return Success(state);
+    }
+    
+    const { text } = await generateText({
+      model: openai("gpt-4o"),
+      system: "Improve the code based on the review feedback.",
+      prompt: `Code: ${state.generatedCode}\n\nIssues: ${state.issues?.join("\n")}`,
+      maxTokens: 4000
+    });
+    
+    return Success({
+      ...state,
+      generatedCode: text,
+      approved: true
+    });
+  });
+
+// Complete AI workflow with quality gates
+const aiCodeWorkflow = chainProcessors<AIWorkflowState>({
+  name: "ai-code-generation-workflow",
+  processors: [
+    codeGenerator,
+    codeReviewer,
+    codeImprover
+  ]
+});
+```
+
+### 🌐 **Real-World AI Example: Website Analysis Pipeline**
+
+Here's the complete website analysis example you provided, showcasing advanced AI patterns:
+
+```typescript
+import {
+  createProcessor,
+  chainProcessors,
+  parallelProcessors,
+  Failure,
+  NetworkError,
+  ProcessorExecutionError,
+  Success,
+  createAppState,
+} from "am2z";
+import type { AppState } from "am2z";
+import FirecrawlApp from "@mendable/firecrawl-js";
+import { AI } from "@/lib/ai/client";
+
+const app = new FirecrawlApp({ apiKey: process.env.FIRECRAWL_API_KEY });
+
+export interface WebsiteAnalysisState extends AppState {
+  url: string;
+  scrapedContent?: string;
+  jsonContent?: any;
+  markdownContent?: string;
+  scrapingDuration?: number;
+  // Individual AI analysis sections
+  companyOverview?: string;
+  productsAndServices?: string;
+  brandIdentity?: string;
+  targetAudience?: string;
+  competitiveLandscape?: string;
+  businessModel?: string;
+  technologyAndInnovation?: string;
+  cultureAndValues?: string;
+  // Combined analysis
+  analysisData?: string;
+  content?: string;
+  title?: string;
+  description?: string;
+  extractedAt: string;
+  isComplete?: boolean;
+}
+
+// Base prompt template with language detection
+const createSectionPrompt = (sectionName: string, instructions: string) => {
+  return `You are an expert business analyst specializing in ${sectionName} analysis. 
+
+${instructions}
+
+IMPORTANT: Analyze the website content and respond in the SAME LANGUAGE as the website content.`;
+};
+
+// Step 1: Website Scraping
+export const scrapeWebsiteContent = createProcessor<WebsiteAnalysisState>(
+  "scrape-website-content"
+)
+  .withDescription("Scrape website content using Firecrawl")
+  .withRetryPolicy({
+    maxAttempts: 3,
+    backoffMs: 5000,
+    shouldRetry: (error: any) => error.category === "network",
+  })
+  .process(async (state, context) => {
+    const startTime = Date.now();
+    
+    context.log.info("Starting website scraping", { url: state.url });
+    
+    context.emit("website:scraping:started", {
+      sessionId: state.metadata.sessionId,
+      url: state.url,
+      timestamp: new Date().toISOString(),
+    });
+    
+    try {
+      const firecrawlResponse = await app.scrapeUrl(state.url, {
+        location: { country: "ES", languages: ["es"] },
+        maxAge: 1000 * 60 * 60 * 24, // 24 hours cache
+      });
+      
+      if (!firecrawlResponse.success) {
+        return Failure(new NetworkError(state.url, 400, new Error("Scraping failed")));
+      }
+      
+      const scrapingDuration = Date.now() - startTime;
+      
+      context.emit("website:scraping:completed", {
+        sessionId: state.metadata.sessionId,
+        duration: scrapingDuration,
+        contentLength: firecrawlResponse.markdown?.length || 0,
+      });
+      
+      return Success({
+        ...state,
+        scrapedContent: firecrawlResponse.markdown || "",
+        jsonContent: firecrawlResponse.json,
+        markdownContent: firecrawlResponse.markdown,
+        scrapingDuration,
+      });
+    } catch (error) {
+      context.log.error("Scraping failed", error);
+      return Failure(error);
+    }
+  });
+
+// Individual AI Analysis Processors
+const analyzeCompanyOverview = createProcessor<WebsiteAnalysisState>("analyze-company")
+  .process(async (state, ctx) => {
+    const { text } = await AI.generateText({
+      input: {
+        model: "gpt-4o",
+        system: createSectionPrompt("Company Overview", 
+          "Extract company name, industry, history, location, size, and structure."),
+        user: `Analyze: ${state.url}\n\n${state.scrapedContent}`,
+      },
+      abortSignal: ctx.signal,
+    });
+    
+    return Success({ ...state, companyOverview: text });
+  });
+
+// ... Additional section analyzers (products, brand, audience, etc.)
+
+// Step 2: Parallel AI Analysis
+export const parallelSectionAnalysis = parallelProcessors<WebsiteAnalysisState>({
+  name: "parallel-section-analysis",
+  processors: [
+    analyzeCompanyOverview,
+    analyzeProductsAndServices,
+    analyzeBrandIdentity,
+    analyzeTargetAudience,
+    analyzeCompetitiveLandscape,
+    analyzeBusinessModel,
+    analyzeTechnologySection,
+    analyzeCultureAndValues,
+  ],
+  timeout: 180000, // 3 minutes for all parallel analyses
+  mergeFunction: (results, originalState) => {
+    // Merge all AI analysis results
+    const finalState = { ...originalState };
+    
+    results.forEach(result => {
+      Object.assign(finalState, result.state);
+    });
+    
+    // Combine all sections into comprehensive analysis
+    finalState.analysisData = `
+# Website Analysis
+
+## Company Overview
+${finalState.companyOverview || "N/A"}
+
+## Products & Services  
+${finalState.productsAndServices || "N/A"}
+
+## Brand Identity
+${finalState.brandIdentity || "N/A"}
+
+## Target Audience
+${finalState.targetAudience || "N/A"}
+
+## Competitive Landscape
+${finalState.competitiveLandscape || "N/A"}
+
+## Business Model
+${finalState.businessModel || "N/A"}
+
+## Technology & Innovation
+${finalState.technologyAndInnovation || "N/A"}
+
+## Culture & Values
+${finalState.cultureAndValues || "N/A"}
+`;
+    
+    return finalState;
+  }
+});
+
+// Step 3: Format Final Content
+const formatAnalysisContent = createProcessor<WebsiteAnalysisState>("format-content")
+  .process(async (state, ctx) => {
+    return Success({
+      ...state,
+      content: state.analysisData,
+      title: state.scrapingMetadata?.title || "Website Analysis",
+      extractedAt: new Date().toISOString(),
+      isComplete: true,
+    });
+  });
+
+// Complete Website Analysis Pipeline
+export const analyzeWebsiteContent = chainProcessors<WebsiteAnalysisState>({
+  name: "analyze-website-content",
+  processors: [
+    scrapeWebsiteContent,
+    parallelSectionAnalysis,
+    formatAnalysisContent,
+  ],
+  timeout: 300000, // 5 minutes total
+});
+
+// Usage
+const runtime = createQueueRuntimeWithDefaults<WebsiteAnalysisState>();
+runtime.register(analyzeWebsiteContent);
+await runtime.start();
+
+const result = await runtime.executeInSession(
+  "analyze-website-content",
+  createAppState("analysis-123", {
+    url: "https://example.com",
+    extractedAt: new Date().toISOString(),
+  }),
+  "website-analysis-session"
+);
+```
+
+### 💡 **Best Practices for AI Integration**
+
+#### **1. Cost Management**
+
+```typescript
+// Implement token counting and limits
+const costAwareProcessor = createProcessor<AIState>("cost-aware-ai")
+  .process(async (state, ctx) => {
+    const estimatedTokens = state.prompt.length / 4; // Rough estimate
+    
+    if (estimatedTokens > 1000) {
+      ctx.log.warn("Large prompt detected", { estimatedTokens });
+      
+      // Use cheaper model for large prompts
+      const model = estimatedTokens > 2000 ? "gpt-3.5-turbo" : "gpt-4o";
+      
+      const { text, usage } = await generateText({
+        model: openai(model),
+        prompt: state.prompt,
+        maxTokens: Math.min(2000, 4000 - estimatedTokens),
+      });
+      
+      // Track costs
+      ctx.emit("ai:token:usage", {
+        model,
+        tokens: usage.totalTokens,
+        estimatedCost: calculateCost(model, usage),
+      });
+      
+      return Success({ ...state, output: text });
+    }
+  });
+```
+
+#### **2. Rate Limiting**
+
+```typescript
+// Configure rate limiting for AI processors
+const rateLimitedAI = createProcessor<AIState>("rate-limited-ai")
+  .withQueueConfig({
+    concurrency: 2, // Max 2 concurrent AI calls
+    rateLimitRpm: 20, // 20 requests per minute
+  })
+  .withRetryPolicy({
+    maxAttempts: 3,
+    backoffMs: 60000, // 1 minute backoff for rate limits
+    shouldRetry: (error) => error.code === "rate_limit_exceeded",
+  })
+  .process(async (state, ctx) => {
+    // Your AI logic here
+  });
+```
+
+#### **3. Caching AI Results**
+
+```typescript
+interface CachedAIState extends AppState {
+  prompt: string;
+  cacheKey?: string;
+  cachedResult?: string;
+  generatedContent?: string;
+}
+
+const cachedAIProcessor = createProcessor<CachedAIState>("cached-ai")
+  .process(async (state, ctx) => {
+    // Generate cache key from prompt
+    const cacheKey = crypto
+      .createHash("sha256")
+      .update(state.prompt)
+      .digest("hex");
+    
+    // Check cache first
+    const cached = await cacheService.get(cacheKey);
+    if (cached) {
+      ctx.log.info("Using cached AI result");
+      return Success({
+        ...state,
+        cacheKey,
+        cachedResult: cached,
+        generatedContent: cached,
+      });
+    }
+    
+    // Generate new content
+    const { text } = await generateText({
+      model: openai("gpt-4o"),
+      prompt: state.prompt,
+    });
+    
+    // Cache the result
+    await cacheService.set(cacheKey, text, 3600); // 1 hour TTL
+    
+    return Success({
+      ...state,
+      cacheKey,
+      generatedContent: text,
+    });
+  });
+```
+
+#### **4. Monitoring AI Performance**
+
+```typescript
+// Track AI performance metrics
+runtime.on("processor:job:completed", (data) => {
+  if (data.processorName.includes("ai-")) {
+    metrics.record({
+      processor: data.processorName,
+      duration: data.executionTime,
+      timestamp: Date.now(),
+      success: true,
+    });
+  }
+});
+
+runtime.on("processor:job:failed", (data) => {
+  if (data.processorName.includes("ai-")) {
+    metrics.record({
+      processor: data.processorName,
+      error: data.error.message,
+      timestamp: Date.now(),
+      success: false,
+    });
+    
+    // Alert on repeated AI failures
+    if (metrics.getFailureRate(data.processorName) > 0.2) {
+      alerting.send({
+        severity: "high",
+        message: `High AI failure rate for ${data.processorName}`,
+      });
+    }
+  }
+});
+```
+
+### 🚀 **Advanced AI Patterns**
+
+#### **1. Multi-Model Orchestration**
+
+```typescript
+// Use different models for different tasks
+const multiModelPipeline = chainProcessors<AIState>({
+  name: "multi-model-pipeline",
+  processors: [
+    // Fast model for initial analysis
+    createProcessor("quick-analysis")
+      .process(async (state, ctx) => {
+        const { text } = await generateText({
+          model: openai("gpt-3.5-turbo"),
+          prompt: `Quickly analyze: ${state.input}`,
+          maxTokens: 500,
+        });
+        return Success({ ...state, quickAnalysis: text });
+      }),
+    
+    // Powerful model for detailed work
+    createProcessor("detailed-analysis")
+      .process(async (state, ctx) => {
+        const { text } = await generateText({
+          model: openai("gpt-4o"),
+          prompt: `Based on ${state.quickAnalysis}, provide detailed analysis`,
+          maxTokens: 2000,
+        });
+        return Success({ ...state, detailedAnalysis: text });
+      }),
+    
+    // Specialized model for specific tasks
+    createProcessor("code-generation")
+      .process(async (state, ctx) => {
+        const { text } = await generateText({
+          model: openai("gpt-4o"), // Best for code
+          system: "You are an expert programmer.",
+          prompt: `Generate code based on: ${state.detailedAnalysis}`,
+        });
+        return Success({ ...state, generatedCode: text });
+      }),
+  ],
+});
+```
+
+#### **2. AI with Human-in-the-Loop**
+
+```typescript
+interface ReviewState extends AppState {
+  aiGenerated: string;
+  humanReviewRequired: boolean;
+  approved?: boolean;
+  feedback?: string;
+  revised?: string;
+}
+
+const humanInLoopWorkflow = chainProcessors<ReviewState>({
+  name: "human-in-loop-ai",
+  processors: [
+    // AI generates initial content
+    aiGenerator,
+    
+    // Check if human review needed
+    createProcessor("check-review-needed")
+      .process(async (state, ctx) => {
+        // Complex logic to determine if review needed
+        const needsReview = await checkComplexity(state.aiGenerated);
+        return Success({ ...state, humanReviewRequired: needsReview });
+      }),
+    
+    // Route based on review requirement
+    routeProcessor(
+      "review-router",
+      (state) => state.humanReviewRequired ? "human" : "auto",
+      {
+        "human": createProcessor("await-human-review")
+          .process(async (state, ctx) => {
+            // Send for human review
+            await notificationService.requestReview({
+              content: state.aiGenerated,
+              sessionId: state.metadata.sessionId,
+            });
+            
+            // Wait for review (would be triggered by external event)
+            ctx.log.info("Awaiting human review");
+            return Success(state);
+          }),
+        
+        "auto": createProcessor("auto-approve")
+          .process(async (state, ctx) => {
+            return Success({ ...state, approved: true });
+          }),
+      }
+    ),
+    
+    // Revise based on feedback if needed
+    createProcessor("revise-content")
+      .process(async (state, ctx) => {
+        if (!state.feedback || state.approved) {
+          return Success(state);
+        }
+        
+        const { text } = await generateText({
+          model: openai("gpt-4o"),
+          prompt: `Revise this content based on feedback:\n\nOriginal: ${state.aiGenerated}\n\nFeedback: ${state.feedback}`,
+        });
+        
+        return Success({ ...state, revised: text, approved: true });
+      }),
+  ],
+});
+```
+
+#### **3. Streaming AI Responses**
+
+```typescript
+// For real-time AI applications
+const streamingAIProcessor = createProcessor<AIState>("streaming-ai")
+  .process(async (state, ctx) => {
+    const stream = await openai("gpt-4o").stream({
+      messages: [{ role: "user", content: state.prompt }],
+    });
+    
+    let fullResponse = "";
+    
+    for await (const chunk of stream) {
+      const content = chunk.choices[0]?.delta?.content || "";
+      fullResponse += content;
+      
+      // Emit progress events
+      ctx.emit("ai:stream:chunk", {
+        sessionId: state.metadata.sessionId,
+        chunk: content,
+        accumulated: fullResponse.length,
+      });
+    }
+    
+    return Success({
+      ...state,
+      generatedContent: fullResponse,
+    });
+  });
+
+// Client can listen to streaming events
+runtime.on("ai:stream:chunk", (data) => {
+  // Update UI with streaming content
+  updateStreamingUI(data.sessionId, data.chunk);
+});
+```
+
+---
+
 ## Best Practices
 
 ### 🏗️ **Design Patterns**

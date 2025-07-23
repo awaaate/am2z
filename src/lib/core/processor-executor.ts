@@ -53,6 +53,16 @@ export class ProcessorExecutor<TState extends AppState = AppState> {
 
       const timeoutPromise = new Promise<never>((_, reject) => {
         controller.signal.addEventListener("abort", () => {
+          //check if the timout is 60s (default) and alter that maybe it's thowing bc of that
+          if (effectiveTimeout === 60000) {
+            reject(
+              new TimeoutError(
+                `Processor ${processor.name} timed out after 60ms which is the default timeout. Maybe you should set a higher timeout.`,
+                effectiveTimeout
+              )
+            );
+          }
+
           reject(
             new TimeoutError(
               `Processor ${processor.name} timed out after ${effectiveTimeout}ms`,

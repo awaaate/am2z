@@ -32,7 +32,10 @@ export class QueueManager<TState extends AppState = AppState> {
   /**
    * Create queue for a processor
    */
-  createQueue(processor: ProcessorDefinition<TState>, sessionId?: string): Queue {
+  createQueue(
+    processor: ProcessorDefinition<TState>,
+    sessionId?: string
+  ): Queue {
     const queueKey = this.getQueueKey(processor.name, sessionId);
     const queueName = this.getQueueName(processor.name, sessionId);
 
@@ -102,12 +105,12 @@ export class QueueManager<TState extends AppState = AppState> {
     if (queue) {
       await queue.close();
       this.queues.delete(queueKey);
-      
+
       // Clean up session tracking
       if (sessionId) {
         this.sessionManager.removeFromSession(sessionId, queueKey);
       }
-      
+
       this.logger.debug(`Removed queue for processor: ${processorName}`, {
         sessionId,
       });
@@ -134,8 +137,19 @@ export class QueueManager<TState extends AppState = AppState> {
   /**
    * Get queue statistics
    */
-  async getQueueStats(processorName?: string, sessionId?: string): Promise<Record<string, any>> {
-    const stats: Record<string, any> = {};
+  async getQueueStats(
+    processorName?: string,
+    sessionId?: string
+  ): Promise<Record<string, any>> {
+    const stats: {
+      [key: string]: {
+        waiting: number;
+        active: number;
+        completed: number;
+        failed: number;
+        delayed: number;
+      };
+    } = {};
 
     let queuesToCheck: Queue[];
     if (processorName) {
@@ -146,7 +160,7 @@ export class QueueManager<TState extends AppState = AppState> {
       // Get all queues for this session
       const sessionQueueKeys = this.sessionManager.getSessionItems(sessionId);
       queuesToCheck = sessionQueueKeys
-        .map(key => this.queues.get(key))
+        .map((key) => this.queues.get(key))
         .filter((q): q is Queue => q !== undefined);
     } else {
       queuesToCheck = Array.from(this.queues.values());
@@ -211,7 +225,7 @@ export class QueueManager<TState extends AppState = AppState> {
 
     await Promise.all(cleanupPromises);
     this.sessionManager.cleanSession(sessionId);
-    
+
     this.logger.info(`Cleaned up session queues: ${sessionId}`, {
       cleanedQueues: sessionQueueKeys.length,
     });
